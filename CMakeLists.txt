@@ -43,6 +43,8 @@ option(BUILD_TESTS "Build tests" ON)
 # Options for AI-Frameworks
 option(WITH_TORCH "Build with support for Torch backend" OFF)
 set(TORCH_VERSION "2.7.1" CACHE STRING "Version of prebuilt Torch to use. Version format: <MAJOR>.<MINOR>.<PATCH>")
+set(LIBTORCH_DIR "" CACHE PATH "Optional path to an existing libtorch CMake prefix (contains share/cmake/Torch)")
+option(USE_PYTHON_TORCH_CMAKE_PREFIX "Use torch.utils.cmake_prefix_path from the AIxelerator Python venv before downloading libtorch" ON)
 option(WITH_TENSORFLOW "Build with support for Tensorflow backend" OFF)
 set(TENSORFLOW_VERSION "2.17.0" CACHE STRING "Version of prebuilt TensorFlow to use.")
 option(WITH_SOL "Build with support for NEC SOL backend" OFF)
@@ -189,24 +191,54 @@ if(WITH_TORCH)
   set(TORCH_SOURCE_DIR "${CMAKE_BINARY_DIR}/extern/torch")
   message(STATUS "TORCH_SOURCE_DIR = ${TORCH_SOURCE_DIR}")
 
-  # TODO: download libtorch CPU or GPU
-  # Torch changed download URL starting with version 2.8.0 and dropped "cxx11-abi" from the URL!
-  if(TORCH_VERSION VERSION_GREATER_EQUAL "2.8.0")
-    set(TORCH_DOWNLOAD_URL "https://download.pytorch.org/libtorch/${TORCH_ARCH}/libtorch-shared-with-deps-${TORCH_VERSION}%2B${TORCH_ARCH}.zip")
-  else()
-    set(TORCH_DOWNLOAD_URL "https://download.pytorch.org/libtorch/${TORCH_ARCH}/libtorch-cxx11-abi-shared-with-deps-${TORCH_VERSION}%2B${TORCH_ARCH}.zip")
+  # Try existing Torch CMake package first (either explicitly provided or from python torch wheel)
+  set(TORCH_CMAKE_PREFIX_CANDIDATE "")
+  if(LIBTORCH_DIR)
+    set(TORCH_CMAKE_PREFIX_CANDIDATE "${LIBTORCH_DIR}")
+    message(STATUS "Trying existing libtorch from LIBTORCH_DIR=${LIBTORCH_DIR}")
+  elseif(USE_PYTHON_TORCH_CMAKE_PREFIX)
+    execute_process(
+      COMMAND ${AIX_VENV_DIR}/bin/python -c "import torch; print(torch.utils.cmake_prefix_path)"
+      RESULT_VARIABLE TORCH_PY_PREFIX_RESULT
+      OUTPUT_VARIABLE TORCH_PY_PREFIX_OUTPUT
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    if(TORCH_PY_PREFIX_RESULT EQUAL 0 AND NOT TORCH_PY_PREFIX_OUTPUT STREQUAL "")
+      set(TORCH_CMAKE_PREFIX_CANDIDATE "${TORCH_PY_PREFIX_OUTPUT}")
+      message(STATUS "Trying existing libtorch from python torch cmake prefix: ${TORCH_CMAKE_PREFIX_CANDIDATE}")
+    endif()
   endif()
-  
-  FetchContent_Declare(
-    TorchDownload
-    URL ${TORCH_DOWNLOAD_URL}
-    SOURCE_DIR "${TORCH_SOURCE_DIR}"
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  )
-  FetchContent_MakeAvailable(TorchDownload)
 
-  list(APPEND CMAKE_PREFIX_PATH ${TORCH_SOURCE_DIR})
-  find_package(Torch REQUIRED)
+  if(NOT TORCH_CMAKE_PREFIX_CANDIDATE STREQUAL "")
+    list(APPEND CMAKE_PREFIX_PATH ${TORCH_CMAKE_PREFIX_CANDIDATE})
+    find_package(Torch QUIET)
+  endif()
+
+  if(NOT Torch_FOUND)
+    message(STATUS "No existing libtorch found, downloading Torch ${TORCH_VERSION} for ${TORCH_ARCH}...")
+
+    # TODO: download libtorch CPU or GPU
+    # Torch changed download URL starting with version 2.8.0 and dropped "cxx11-abi" from the URL!
+    if(TORCH_VERSION VERSION_GREATER_EQUAL "2.8.0")
+      set(TORCH_DOWNLOAD_URL "https://download.pytorch.org/libtorch/${TORCH_ARCH}/libtorch-shared-with-deps-${TORCH_VERSION}%2B${TORCH_ARCH}.zip")
+    else()
+      set(TORCH_DOWNLOAD_URL "https://download.pytorch.org/libtorch/${TORCH_ARCH}/libtorch-cxx11-abi-shared-with-deps-${TORCH_VERSION}%2B${TORCH_ARCH}.zip")
+    endif()
+    
+    FetchContent_Declare(
+      TorchDownload
+      URL ${TORCH_DOWNLOAD_URL}
+      SOURCE_DIR "${TORCH_SOURCE_DIR}"
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(TorchDownload)
+
+    list(APPEND CMAKE_PREFIX_PATH ${TORCH_SOURCE_DIR})
+    find_package(Torch REQUIRED)
+  else()
+    message(STATUS "Using existing libtorch from CMake package at: ${Torch_DIR}")
+  endif()
 
   # remove libcuda from TORCH_LIBRARIES
   message(STATUS "Torch Libraries defined by FindTorch = ${TORCH_LIBRARIES}")
@@ -225,7 +257,8 @@ if(WITH_TORCH)
   set(TORCH_LIBRARIES ${TORCH_LIBRARIES_TMP})
 
   # add torch libraries required for installation to be found via RPATH
-  set(TORCH_LIB_DIR "${TORCH_SOURCE_DIR}/lib")
+  get_filename_component(TORCH_PACKAGE_ROOT "${Torch_DIR}/../../.." ABSOLUTE)
+  set(TORCH_LIB_DIR "${TORCH_PACKAGE_ROOT}/lib")
   message(STATUS "TORCH_LIB_DIR = ${TORCH_LIB_DIR}")
   file(GLOB TORCH_CORE_LIBS "${TORCH_LIB_DIR}/libtorch*.so")
   message(STATUS "TORCH_CORE_LIBS = ${TORCH_CORE_LIBS}")
