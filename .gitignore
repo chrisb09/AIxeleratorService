@@ -47,3 +47,4 @@ BUILD*
 # private ML models
 models/private/*
 
+INSTALL-SCOREP/
