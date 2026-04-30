@@ -18,6 +18,25 @@ if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
     message(STATUS "Found CUDA compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "Found CUDA compiler version: ${CMAKE_CUDA_COMPILER_VERSION}")
+    find_package(CUDAToolkit QUIET)
+    if(CUDAToolkit_FOUND)
+        message(STATUS "Found CUDAToolkit: ${CUDAToolkit_VERSION}")
+        # PyTorch's CMake still relies on legacy FindCUDA variables in parts of
+        # its CUDA detection path (notably CUDA_INCLUDE_DIRS for a try_run
+        # header-version probe). Mirror the modern toolkit result into those
+        # variables so torch's probe sees <cuda.h> without hardcoding paths.
+        set(_aix_cuda_root "")
+        if(DEFINED CUDAToolkit_ROOT_DIR AND NOT CUDAToolkit_ROOT_DIR STREQUAL "")
+            set(_aix_cuda_root "${CUDAToolkit_ROOT_DIR}")
+        elseif(DEFINED CMAKE_CUDA_COMPILER_TOOLKIT_ROOT AND NOT CMAKE_CUDA_COMPILER_TOOLKIT_ROOT STREQUAL "")
+            set(_aix_cuda_root "${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT}")
+        endif()
+
+        if(NOT _aix_cuda_root STREQUAL "")
+            set(CUDA_TOOLKIT_ROOT_DIR "${_aix_cuda_root}" CACHE PATH "CUDA toolkit root for legacy FindCUDA consumers" FORCE)
+            set(CUDA_INCLUDE_DIRS "${_aix_cuda_root}/include" CACHE PATH "CUDA include directory for legacy FindCUDA consumers" FORCE)
+        endif()
+    endif()
 
     # determine individual MAJOR, MINOR, PATCH version of CUDA
     string(REPLACE "." ";" CUDA_VERSION_LIST "${CMAKE_CUDA_COMPILER_VERSION}")
@@ -101,9 +120,13 @@ endif()
 
 # creation of virtual environment
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-set(AIX_VENV_DIR "${CMAKE_BINARY_DIR}/extern/venv-py${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}${Python3_VERSION_PATCH}")
+if (NOT AIX_VENV_DIR)
+  set(AIX_VENV_DIR "${CMAKE_BINARY_DIR}/extern/venv-py${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}${Python3_VERSION_PATCH}")
+endif()
+message(STATUS "Using AIX_VENV_DIR: ${AIX_VENV_DIR}")
+
 # check if the environment already exists
-if(NOT EXISTS "${AIX_VENV_DIR}/bin/activate")
+if(NOT EXISTS "${AIX_VENV_DIR}/bin/activate" AND NOT AIX_SKIP_VENV_CREATION)
   message(STATUS "No existing Python virtual environment found! Installing now!")
   execute_process(
     COMMAND ${Python3_EXECUTABLE} -m venv ${AIX_VENV_DIR}
@@ -211,8 +234,38 @@ if(WITH_TORCH)
   endif()
 
   if(NOT TORCH_CMAKE_PREFIX_CANDIDATE STREQUAL "")
+    set(_aix_saved_cpath "$ENV{CPATH}")
+    set(_aix_saved_ld_library_path "$ENV{LD_LIBRARY_PATH}")
+    if(CMAKE_CUDA_COMPILER)
+      set(_aix_cuda_include_dir "")
+      set(_aix_cuda_lib_dir "")
+      if(DEFINED CUDA_INCLUDE_DIRS AND NOT CUDA_INCLUDE_DIRS STREQUAL "")
+        list(GET CUDA_INCLUDE_DIRS 0 _aix_cuda_include_dir)
+      elseif(DEFINED CUDA_TOOLKIT_ROOT_DIR AND NOT CUDA_TOOLKIT_ROOT_DIR STREQUAL "")
+        set(_aix_cuda_include_dir "${CUDA_TOOLKIT_ROOT_DIR}/include")
+      endif()
+      if(DEFINED CUDA_TOOLKIT_ROOT_DIR AND NOT CUDA_TOOLKIT_ROOT_DIR STREQUAL "")
+        set(_aix_cuda_lib_dir "${CUDA_TOOLKIT_ROOT_DIR}/lib64")
+      endif()
+      if(NOT _aix_cuda_include_dir STREQUAL "")
+        if(_aix_saved_cpath STREQUAL "")
+          set(ENV{CPATH} "${_aix_cuda_include_dir}")
+        else()
+          set(ENV{CPATH} "${_aix_cuda_include_dir}:$ENV{CPATH}")
+        endif()
+      endif()
+      if(NOT _aix_cuda_lib_dir STREQUAL "")
+        if(_aix_saved_ld_library_path STREQUAL "")
+          set(ENV{LD_LIBRARY_PATH} "${_aix_cuda_lib_dir}")
+        else()
+          set(ENV{LD_LIBRARY_PATH} "${_aix_cuda_lib_dir}:$ENV{LD_LIBRARY_PATH}")
+        endif()
+      endif()
+    endif()
     list(APPEND CMAKE_PREFIX_PATH ${TORCH_CMAKE_PREFIX_CANDIDATE})
     find_package(Torch QUIET)
+    set(ENV{CPATH} "${_aix_saved_cpath}")
+    set(ENV{LD_LIBRARY_PATH} "${_aix_saved_ld_library_path}")
   endif()
 
   if(NOT Torch_FOUND)
@@ -272,6 +325,40 @@ if(WITH_TORCH)
     FILES ${TORCH_INSTALL_LIBS}
     DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
   )
+
+  if(CMAKE_CUDA_COMPILER)
+    if(TARGET CUDA::cupti)
+      message(STATUS "Linking AIxeleratorService against CUDA::cupti")
+      set(AIX_CUPTI_LIB CUDA::cupti)
+    else()
+      set(_cupti_hints "")
+      if(DEFINED CUDAToolkit_LIBRARY_ROOT)
+        list(APPEND _cupti_hints ${CUDAToolkit_LIBRARY_ROOT})
+      endif()
+      if(DEFINED CUDAToolkit_ROOT)
+        list(APPEND _cupti_hints ${CUDAToolkit_ROOT})
+        list(APPEND _cupti_hints ${CUDAToolkit_ROOT}/extras/CUPTI/lib64)
+        list(APPEND _cupti_hints ${CUDAToolkit_ROOT}/lib64)
+      endif()
+      if(DEFINED CMAKE_CUDA_COMPILER_TOOLKIT_ROOT)
+        list(APPEND _cupti_hints ${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT})
+        list(APPEND _cupti_hints ${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT}/extras/CUPTI/lib64)
+        list(APPEND _cupti_hints ${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT}/lib64)
+      endif()
+
+      find_library(AIX_CUPTI_LIB
+        NAMES cupti
+        HINTS ${_cupti_hints}
+        PATH_SUFFIXES extras/CUPTI/lib64 lib64
+      )
+    endif()
+
+    if(AIX_CUPTI_LIB)
+      message(STATUS "Using CUPTI library: ${AIX_CUPTI_LIB}")
+    else()
+      message(FATAL_ERROR "WITH_TORCH is ON with CUDA available, but the CUPTI library could not be found.")
+    endif()
+  endif()
 endif()
 
 if(WITH_TENSORFLOW)
@@ -392,4 +479,3 @@ add_subdirectory(models)
 if(BUILD_TESTS)
   add_subdirectory(test)
 endif()
-

@@ -52,6 +52,9 @@ if(WITH_TORCH)
     target_sources(AIxeleratorServiceLib PRIVATE inferenceStrategy/torchInference/torchInference.cpp)
     target_include_directories(AIxeleratorServiceLib PUBLIC ${TORCH_INCLUDE_DIRS})
     target_link_libraries(AIxeleratorServiceLib PUBLIC ${TORCH_LIBRARIES})
+    if(AIX_CUPTI_LIB)
+        target_link_libraries(AIxeleratorServiceLib PUBLIC ${AIX_CUPTI_LIB})
+    endif()
 endif()
 
 if(WITH_TENSORFLOW)
@@ -112,4 +115,3 @@ install(
     LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
     #PUBLIC_HEADER DESTINATION ${CMAKE_BINARY_DIR}/include
 )
-
