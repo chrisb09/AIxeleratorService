@@ -108,7 +108,7 @@ void TorchInference<T>::inference()
                 SCOREP_USER_REGION_BEGIN(torchForwardHandle, "torchInference::forward", SCOREP_USER_REGION_TYPE_COMMON)
             #endif
 
-            output_gpu_ = torch_model_.forward(inputs).toTensor();
+            try { output_gpu_ = torch_model_.forward(inputs).toTensor(); } catch (const std::exception& e) { std::cerr << "INPUT SHAPE: "; for(int k=0; k<input_gpu_.dim(); ++k) std::cerr << input_gpu_.size(k) << " "; std::cerr << "\nException: " << e.what() << "\n"; throw; }
             
             #ifdef SCOREP
                 SCOREP_USER_REGION_END(torchForwardHandle)
@@ -124,11 +124,14 @@ void TorchInference<T>::inference()
             input_batch_ = input_.slice(0, batchsize_*i, batchsize_*(i+1));
             std::vector<torch::jit::IValue> inputs = {input_batch_};
 
+            // NEW: Print safely to stdout and flush!
+            std::cout << "TorchInference::inference on CPU -> input_batch_ dim: " << input_batch_.dim() << " shape[1]: " << (input_batch_.dim() > 1 ? input_batch_.size(1) : -1) << std::endl;
+
             #ifdef SCOREP
                 SCOREP_USER_REGION_BEGIN(torchForwardHandle, "torchInference::forward", SCOREP_USER_REGION_TYPE_COMMON)
             #endif
 
-            output_batch_ = torch_model_.forward(inputs).toTensor();
+            try { output_batch_ = torch_model_.forward(inputs).toTensor(); } catch (const std::exception& e) { std::cerr << "INPUT SHAPE: "; for(int k=0; k<input_batch_.dim(); ++k) std::cerr << input_batch_.size(k) << " "; std::cerr << "\nException: " << e.what() << std::endl; throw; }
 
             #ifdef SCOREP
                 SCOREP_USER_REGION_END(torchForwardHandle)
