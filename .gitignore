@@ -48,3 +48,10 @@ BUILD*
 models/private/*
 
 INSTALL-SCOREP/
+
+# libtorch downloads
+*.zip
+
+# Slurm build logs
+*.err
+build-aix.*.out

@@ -2,6 +2,9 @@
 
 #include <iostream>
 #include <numeric>
+#include <fstream>
+#include <sstream>
+#include <cstdlib>
 
 
 template<typename T>
@@ -116,6 +119,14 @@ void CollectiveCommunication<T>::setOutputData(int output_sendcount, T* output_d
 template<typename T>
 void CollectiveCommunication<T>::gatherInputData()
 {
+    const char* dump_dir = std::getenv("DUMP_TENSOR_DIR");
+    if (dump_dir) {
+        int rank; MPI_Comm_rank(work_group_comm_, &rank);
+        std::ostringstream tag;
+        tag << dump_dir << "/aix_gather_src_wg" << rank << "_ptr" << (void*)input_data_worker_ << "_" << input_sendcount_ << "elems";
+        std::ofstream(tag.str() + ".bin", std::ios::binary)
+            .write(reinterpret_cast<const char*>(input_data_worker_), input_sendcount_ * sizeof(T));
+    }
     MPI_Gatherv(input_data_worker_, input_sendcount_, dtype_, this->input_data_controller_, input_recvcounts_.data(), input_displs_.data(), dtype_, 0, work_group_comm_);
 }
 

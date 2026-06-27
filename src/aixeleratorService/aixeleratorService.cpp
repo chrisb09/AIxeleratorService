@@ -52,6 +52,9 @@ AIxeleratorService<T>::AIxeleratorService(
         batchsize_{batchsize}, 
         enable_hybrid_{enable_hybrid}, host_fraction_{host_fraction}
 {
+    if (std::getenv("DUMP_TENSOR_DIR")) {
+        std::cerr << "AIX_CTOR this=" << (void*)this << " input_data_=" << (void*)input_data_ << " input_data_param=" << (void*)input_data << std::endl;
+    }
     registerModel(model_file);
 #ifdef WITH_SOL
     if ( framework_ == AIX_SOL )
@@ -324,7 +327,9 @@ void AIxeleratorService<T>::initInferenceStrategy(std::pair<int64_t, int64_t> be
     communicator_.reset();
     if (distributor_->getNumDevicesTotal() > 0)
     {
-        
+        if (std::getenv("DUMP_TENSOR_DIR")) {
+            std::cerr << "AIX_INIT this=" << (void*)this << " input_data_device_=" << (void*)input_data_device_ << " input_data_=" << (void*)input_data_ << std::endl;
+        }
         communicator_ = std::make_unique<CollectiveCommunication<T>>(
             input_shape_device_, input_data_device_, 
             output_shape_device_, output_data_device_, 

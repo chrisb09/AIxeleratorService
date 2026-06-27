@@ -3,6 +3,9 @@
 #include <vector>
 #include <memory>
 #include <iostream>
+#include <fstream>
+#include <sstream>
+#include <cstdlib>
 
 #include <ATen/ATen.h>
 
@@ -87,7 +90,21 @@ void TorchInference<T>::inference()
     SCOREP_USER_REGION_BEGIN(torchInferenceHandle, "torchInference::inference", SCOREP_USER_REGION_TYPE_FUNCTION)
 #endif
 
-    torch::NoGradGuard no_grad; 
+    torch::NoGradGuard no_grad;
+    torch_model_.eval();
+
+    static int call_count = 0;
+    const char* dump_dir = std::getenv("DUMP_TENSOR_DIR");
+
+    // Dump the full controller input BEFORE slicing
+    if (dump_dir) {
+        auto cpu = input_.contiguous().to(torch::kCPU);
+        std::ostringstream tag; tag << dump_dir << "/aix_full_input_s" << call_count;
+        std::ofstream(tag.str() + ".bin", std::ios::binary)
+            .write(static_cast<const char*>(cpu.data_ptr()), cpu.numel() * sizeof(T));
+        std::ofstream s(tag.str() + ".shape"); s << cpu.dim(); for (int d=0; d<cpu.dim(); ++d) s << " " << cpu.size(d);
+    }
+
     int batch_dim = input_.size(0);
     int num_batches = batch_dim / batchsize_;
     int size_remaining = batch_dim % batchsize_;
@@ -103,6 +120,14 @@ void TorchInference<T>::inference()
             input_batch_ = input_.slice(0, batchsize_*i, batchsize_*(i+1));
             input_gpu_ = input_batch_.to(torch::Device(torch::kCUDA, device_id_));
             std::vector<torch::jit::IValue> inputs = {input_gpu_};
+
+            if (dump_dir) {
+                std::ostringstream tag; tag << dump_dir << "/aix_input_s" << call_count << "_b" << i;
+                auto cpu = input_batch_.contiguous().to(torch::kCPU);
+                std::ofstream(tag.str() + ".bin", std::ios::binary)
+                    .write(static_cast<const char*>(cpu.data_ptr()), cpu.numel() * sizeof(T));
+                std::ofstream s(tag.str() + ".shape"); s << cpu.dim(); for (int d=0; d<cpu.dim(); ++d) s << " " << cpu.size(d);
+            }
 
             #ifdef SCOREP
                 SCOREP_USER_REGION_BEGIN(torchForwardHandle, "torchInference::forward", SCOREP_USER_REGION_TYPE_COMMON)
@@ -124,8 +149,13 @@ void TorchInference<T>::inference()
             input_batch_ = input_.slice(0, batchsize_*i, batchsize_*(i+1));
             std::vector<torch::jit::IValue> inputs = {input_batch_};
 
-            // NEW: Print safely to stdout and flush!
-            std::cout << "TorchInference::inference on CPU -> input_batch_ dim: " << input_batch_.dim() << " shape[1]: " << (input_batch_.dim() > 1 ? input_batch_.size(1) : -1) << std::endl;
+            if (dump_dir) {
+                std::ostringstream tag; tag << dump_dir << "/aix_input_s" << call_count << "_b" << i;
+                auto cpu = input_batch_.contiguous().to(torch::kCPU);
+                std::ofstream(tag.str() + ".bin", std::ios::binary)
+                    .write(static_cast<const char*>(cpu.data_ptr()), cpu.numel() * sizeof(T));
+                std::ofstream s(tag.str() + ".shape"); s << cpu.dim(); for (int d=0; d<cpu.dim(); ++d) s << " " << cpu.size(d);
+            }
 
             #ifdef SCOREP
                 SCOREP_USER_REGION_BEGIN(torchForwardHandle, "torchInference::forward", SCOREP_USER_REGION_TYPE_COMMON)
@@ -140,6 +170,7 @@ void TorchInference<T>::inference()
             output_.slice(0, batchsize_*i, batchsize_*(i+1)) = output_batch_.to(torch::kCPU);
         }   
     }
+    call_count++;
 
 #ifdef SCOREP
     SCOREP_USER_REGION_END(torchInferenceHandle)
