@@ -29,6 +29,8 @@ SCOREP_USER_REGION_DEFINE( gatherHandle )
 SCOREP_USER_REGION_DEFINE( deviceInferenceHandle )
 SCOREP_USER_REGION_DEFINE( hostInferenceHandle )
 SCOREP_USER_REGION_DEFINE( scatterHandle )
+#include "aixeleratorService/nvml.hpp"
+SCOREP_USER_METRIC_GLOBAL( metric_gpu_mem )
 #endif
 
 #include <numeric>
@@ -368,6 +370,12 @@ void AIxeleratorService<T>::inference()
 
 #ifdef SCOREP
     SCOREP_USER_REGION( "inference", SCOREP_USER_REGION_TYPE_FUNCTION )
+    static bool metric_gpu_mem_init = false;
+    if (!metric_gpu_mem_init) {
+        SCOREP_USER_METRIC_INIT(metric_gpu_mem, "gpu_mem_used_bytes", "bytes", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
+        metric_gpu_mem_init = true;
+    }
+    SCOREP_USER_METRIC_UINT64(metric_gpu_mem, get_gpu_memory_used());
 #endif
 
     if(my_rank_ == 0)
@@ -419,6 +427,7 @@ void AIxeleratorService<T>::inference()
     }
 #ifdef SCOREP
     SCOREP_USER_REGION_END( scatterHandle )
+    SCOREP_USER_METRIC_UINT64(metric_gpu_mem, get_gpu_memory_used());
 #endif
 }
 

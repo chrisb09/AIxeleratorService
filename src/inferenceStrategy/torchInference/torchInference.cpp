@@ -14,6 +14,10 @@
 
 SCOREP_USER_REGION_DEFINE( torchInferenceHandle )
 SCOREP_USER_REGION_DEFINE( torchForwardHandle )
+SCOREP_USER_REGION_DEFINE( h2dCopyHandle )
+SCOREP_USER_REGION_DEFINE( d2hCopyHandle )
+SCOREP_USER_REGION_DEFINE( cpuChunkSliceHandle )
+SCOREP_USER_REGION_DEFINE( cpuChunkAssignHandle )
 #endif
 
 template<typename T>
@@ -118,7 +122,13 @@ void TorchInference<T>::inference()
         for( int i = 0; i < num_batches; i++)
         {
             input_batch_ = input_.slice(0, batchsize_*i, batchsize_*(i+1));
+#ifdef SCOREP
+                SCOREP_USER_REGION_BEGIN(h2dCopyHandle, "h2d_copy", SCOREP_USER_REGION_TYPE_COMMON)
+            #endif
             input_gpu_ = input_batch_.to(torch::Device(torch::kCUDA, device_id_));
+            #ifdef SCOREP
+                SCOREP_USER_REGION_END(h2dCopyHandle)
+            #endif
             std::vector<torch::jit::IValue> inputs = {input_gpu_};
 
             if (dump_dir) {
@@ -139,14 +149,26 @@ void TorchInference<T>::inference()
                 SCOREP_USER_REGION_END(torchForwardHandle)
             #endif
 
+#ifdef SCOREP
+                SCOREP_USER_REGION_BEGIN(d2hCopyHandle, "d2h_copy", SCOREP_USER_REGION_TYPE_COMMON)
+            #endif
             output_.slice(0, batchsize_*i, batchsize_*(i+1)) = output_gpu_.to(torch::kCPU);
+            #ifdef SCOREP
+                SCOREP_USER_REGION_END(d2hCopyHandle)
+            #endif
         }
     }
     else
     {
         for( int i = 0; i < num_batches; i++)
         {
+#ifdef SCOREP
+                SCOREP_USER_REGION_BEGIN(cpuChunkSliceHandle, "cpu_chunk_slice", SCOREP_USER_REGION_TYPE_COMMON)
+            #endif
             input_batch_ = input_.slice(0, batchsize_*i, batchsize_*(i+1));
+            #ifdef SCOREP
+                SCOREP_USER_REGION_END(cpuChunkSliceHandle)
+            #endif
             std::vector<torch::jit::IValue> inputs = {input_batch_};
 
             if (dump_dir) {
@@ -167,7 +189,13 @@ void TorchInference<T>::inference()
                 SCOREP_USER_REGION_END(torchForwardHandle)
             #endif
 
+#ifdef SCOREP
+                SCOREP_USER_REGION_BEGIN(cpuChunkAssignHandle, "cpu_chunk_assign", SCOREP_USER_REGION_TYPE_COMMON)
+            #endif
             output_.slice(0, batchsize_*i, batchsize_*(i+1)) = output_batch_.to(torch::kCPU);
+            #ifdef SCOREP
+                SCOREP_USER_REGION_END(cpuChunkAssignHandle)
+            #endif
         }   
     }
     call_count++;

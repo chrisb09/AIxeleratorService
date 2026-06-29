@@ -38,6 +38,7 @@ if(WITH_SCOREP)
             USER ON
             COMPILER OFF
     )
+    target_link_libraries(AIxeleratorServiceLib PUBLIC nvidia-ml)
 endif()
 
 if(WITH_HWLOC)

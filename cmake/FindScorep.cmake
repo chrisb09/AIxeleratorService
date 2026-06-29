@@ -245,7 +245,7 @@ function(scorep_instrument_target _target)
     _scorep_configure_subsystem(${_target} SCOREP_ENABLE_USER "--user" "--nouser")
     _scorep_configure_subsystem(${_target} SCOREP_ENABLE_CUDA "--cuda" "--nocuda")
     _scorep_configure_subsystem(${_target} SCOREP_IO_SYSTEM "--io=@arg@" "--io=none")
-    _scorep_configure_subsystem(${_target} SCOREP_MEMORY_SYSTEM "--io=@arg@" "--io=none")
+    _scorep_configure_subsystem(${_target} SCOREP_MEMORY_SYSTEM "--memory=@arg@" "--memory=none")
     _scorep_configure_subsystem(${_target} SCOREP_MPP_SYSTEM "--mpp=@arg@" "--mpp=none")
     _scorep_configure_subsystem(${_target} SCOREP_THREADING_SYSTEM "--thread=@arg@" "--thread=none")
 
