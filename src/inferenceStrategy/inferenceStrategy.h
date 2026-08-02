@@ -6,6 +6,13 @@
 
 #include <mpi.h>
 
+struct InferenceTiming {
+    double h2d_gpu_ms = 0.0;
+    double forward_gpu_ms = 0.0;
+    double d2h_gpu_ms = 0.0;
+    int device_batches = 0;
+};
+
 template<typename T>
 class InferenceStrategy
 {
@@ -24,6 +31,7 @@ class InferenceStrategy
             std::vector<int64_t>& output_shape, T* outputData
         ) = 0;
         virtual void inference() = 0;
+        virtual InferenceTiming getLastTiming() const { return {}; }
 
         std::string debug_tag_;
         void setDebugTag(std::string tag){ debug_tag_ = tag; }

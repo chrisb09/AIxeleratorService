@@ -21,6 +21,7 @@ class TorchInference : public InferenceStrategy<T>
         //void setInput() override;
         //void setOutput() override;
         void inference() override;
+        InferenceTiming getLastTiming() const override { return last_timing_; }
 
     private:
         std::string model_file_name_;
@@ -33,6 +34,7 @@ class TorchInference : public InferenceStrategy<T>
         torch::Tensor output_;
         torch::Tensor output_batch_;
         torch::Tensor output_gpu_;
+        InferenceTiming last_timing_;
 };
 
 
