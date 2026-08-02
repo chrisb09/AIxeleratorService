@@ -409,7 +409,7 @@ void AIxeleratorService<T>::inference()
         SCOREP_USER_METRIC_INIT(metric_gpu_mem, "gpu_mem_used_bytes", "bytes", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
         SCOREP_USER_METRIC_INIT(metric_aix_input_bytes, "aix_input_bytes", "bytes", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
         SCOREP_USER_METRIC_INIT(metric_aix_output_bytes, "aix_output_bytes", "bytes", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
-        SCOREP_USER_METRIC_INIT(metric_aix_device_batches, "aix_device_batches", "batches", SCOREP_USER_METRIC_CONTEXT_CALLPATH);
+        SCOREP_USER_METRIC_INIT(metric_aix_device_batches, "aix_device_batches", "batches", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
         metric_gpu_mem_init = true;
     }
     SCOREP_USER_METRIC_UINT64(metric_gpu_mem, get_gpu_memory_used());
