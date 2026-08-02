@@ -28,6 +28,7 @@
 SCOREP_USER_REGION_DEFINE( gatherHandle )
 SCOREP_USER_REGION_DEFINE( deviceInferenceHandle )
 SCOREP_USER_REGION_DEFINE( controllerDeviceInferenceHandle )
+SCOREP_USER_REGION_DEFINE( controllerPipelinedInferenceHandle )
 SCOREP_USER_REGION_DEFINE( hostInferenceHandle )
 SCOREP_USER_REGION_DEFINE( scatterHandle )
 #include "aixeleratorService/nvml.hpp"
@@ -73,7 +74,10 @@ AIxeleratorService<T>::AIxeleratorService(
         input_shape_{input_shape}, input_data_{input_data}, 
         output_shape_{output_shape}, output_data_{output_data}, 
         batchsize_{batchsize}, 
-        enable_hybrid_{enable_hybrid}, host_fraction_{host_fraction}
+        enable_hybrid_{enable_hybrid},
+        pipelined_{std::getenv("AIX_COMMUNICATION_MODE") != nullptr &&
+                   std::string(std::getenv("AIX_COMMUNICATION_MODE")) == "pipelined"},
+        host_fraction_{host_fraction}
 {
     if (std::getenv("DUMP_TENSOR_DIR")) {
         std::cerr << "AIX_CTOR this=" << (void*)this << " input_data_=" << (void*)input_data_ << " input_data_param=" << (void*)input_data << std::endl;
@@ -417,6 +421,26 @@ void AIxeleratorService<T>::inference()
     SCOREP_USER_METRIC_UINT64(metric_aix_output_bytes,
                               static_cast<uint64_t>(tensor_elements(output_shape_) * sizeof(T)));
 #endif
+
+    if (pipelined_ && enable_hybrid_) {
+        throw std::runtime_error("Pipelined communication does not support hybrid host/device inference.");
+    }
+
+    if (pipelined_ && communicator_) {
+        if (distributor_->isGPUController() && !inferencing_device_) {
+            throw std::runtime_error("Pipelined communication requires a controller device inference strategy.");
+        }
+        communicator_->pipelinedExchange([this](int64_t start_sample, int64_t sample_count) {
+#ifdef SCOREP
+            SCOREP_USER_REGION_BEGIN(controllerPipelinedInferenceHandle, "aix_controller_pipelined_inference", SCOREP_USER_REGION_TYPE_COMMON)
+#endif
+            inferencing_device_->inferenceRange(start_sample, sample_count);
+#ifdef SCOREP
+            SCOREP_USER_REGION_END(controllerPipelinedInferenceHandle)
+#endif
+        });
+        return;
+    }
 
     if(my_rank_ == 0)
         std::cout << "AIxeleratorService: gathering input data" << std::endl;

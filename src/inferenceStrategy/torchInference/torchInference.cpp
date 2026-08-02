@@ -260,6 +260,25 @@ void TorchInference<T>::inference()
 #endif
 }
 
+template<typename T>
+void TorchInference<T>::inferenceRange(int64_t start_sample, int64_t sample_count)
+{
+    if (start_sample < 0 || sample_count < 0 || start_sample + sample_count > input_.size(0)) {
+        throw std::out_of_range("Torch range inference is outside the configured input tensor.");
+    }
+    if (sample_count == 0) {
+        return;
+    }
+
+    const auto full_input = input_;
+    const auto full_output = output_;
+    input_ = input_.narrow(0, start_sample, sample_count);
+    output_ = output_.narrow(0, start_sample, sample_count);
+    inference();
+    input_ = full_input;
+    output_ = full_output;
+}
+
 
 template class TorchInference<float>;
 template class TorchInference<double>;

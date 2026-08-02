@@ -3,6 +3,8 @@
 
 #include <vector>
 #include <cstdint>
+#include <functional>
+#include <stdexcept>
 
 template<typename T>
 class CommunicationStrategy
@@ -12,6 +14,10 @@ class CommunicationStrategy
 
         virtual void gatherInputData() = 0;
         virtual void scatterOutputData() = 0;
+        virtual void pipelinedExchange(const std::function<void(int64_t, int64_t)>&)
+        {
+            throw std::runtime_error("The selected communication strategy does not support pipelined exchange.");
+        }
 
         T* getInputDataController(){ return input_data_controller_; }
         T* getOutputDataController(){ return output_data_controller_; }

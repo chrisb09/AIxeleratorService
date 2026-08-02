@@ -62,6 +62,7 @@ class AIxeleratorService
         T* output_data_device_;
         int batchsize_; // TODO: remove this
         bool enable_hybrid_;
+        bool pipelined_;
         std::optional<float> host_fraction_;
 
         AIFramework framework_;

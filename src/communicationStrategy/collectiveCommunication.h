@@ -20,6 +20,7 @@ class CollectiveCommunication : public CommunicationStrategy<T>
 
         void gatherInputData() override;
         void scatterOutputData() override;
+        void pipelinedExchange(const std::function<void(int64_t, int64_t)>& infer_range) override;
 
         void setInputData(int input_sendcount, T* input_data);
         void setOutputData(int output_sendcount, T* output_data);
@@ -30,6 +31,7 @@ class CollectiveCommunication : public CommunicationStrategy<T>
         int workgroup_size_;
 
         MPI_Comm work_group_comm_;
+        MPI_Comm pipelined_comm_;
         MPI_Datatype dtype_;
         T* input_data_worker_;
 
@@ -42,6 +44,8 @@ class CollectiveCommunication : public CommunicationStrategy<T>
         int output_sendcount_;
         std::vector<int> output_recvcounts_;
         std::vector<int> output_displs_;
+
+        std::vector<int> node_leaders_;
 };
 
 #endif

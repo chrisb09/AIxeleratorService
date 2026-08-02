@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <mpi.h>
+#include <stdexcept>
 
 struct InferenceTiming {
     double h2d_gpu_ms = 0.0;
@@ -31,6 +32,10 @@ class InferenceStrategy
             std::vector<int64_t>& output_shape, T* outputData
         ) = 0;
         virtual void inference() = 0;
+        virtual void inferenceRange(int64_t, int64_t)
+        {
+            throw std::runtime_error("The selected inference backend does not support range inference.");
+        }
         virtual InferenceTiming getLastTiming() const { return {}; }
 
         std::string debug_tag_;

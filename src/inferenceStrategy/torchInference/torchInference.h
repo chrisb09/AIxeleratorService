@@ -21,6 +21,7 @@ class TorchInference : public InferenceStrategy<T>
         //void setInput() override;
         //void setOutput() override;
         void inference() override;
+        void inferenceRange(int64_t start_sample, int64_t sample_count) override;
         InferenceTiming getLastTiming() const override { return last_timing_; }
 
     private:
