@@ -64,6 +64,7 @@ build_*/
 build_aix/
 build_dir/
 build_scorep/
+build-*/
 
 # Score-P profiling output
 scorep-*/
