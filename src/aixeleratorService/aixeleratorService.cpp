@@ -8,6 +8,7 @@
 
 #include "communicationStrategy/collectiveCommunication.h"
 #include "communicationStrategy/nonBlockingPtoPCommunication.h"
+#include "utils/p2pTimeline.h"
 
 #ifdef WITH_TORCH
 #include "inferenceStrategy/torchInference/torchInference.h"
@@ -59,6 +60,29 @@ bool aix_diagnostic_barriers_enabled()
 {
     const char* value = std::getenv("AIX_DIAGNOSTIC_BARRIERS");
     return value != nullptr && std::string(value) == "1";
+}
+
+#ifdef SCOREP
+bool aix_gpu_memory_metric_enabled()
+{
+    const char* value = std::getenv("AIX_SCOREP_GPU_MEMORY_METRIC");
+    return value != nullptr && std::string(value) == "1";
+}
+#endif
+
+void write_service_timeline_event(const char* event, int world_rank, MPI_Comm workgroup_comm,
+                                  bool is_controller)
+{
+    const char* directory = std::getenv("AIX_P2P_TIMELINE_DIR");
+    const char* step_text = std::getenv("AIX_P2P_TIMELINE_STEP");
+    if (!directory || !step_text) {
+        return;
+    }
+    int workgroup_rank = -1;
+    MPI_Comm_rank(workgroup_comm, &workgroup_rank);
+    aixelerator_service::utils::writeP2PTimelineEvent(
+        static_cast<uint64_t>(std::strtoll(step_text, nullptr, 10)),
+        world_rank, workgroup_rank, is_controller, event);
 }
 } // namespace
 
@@ -412,7 +436,13 @@ void AIxeleratorService<T>::inference()
         SCOREP_USER_METRIC_INIT(metric_aix_device_batches, "aix_device_batches", "batches", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
         metric_gpu_mem_init = true;
     }
-    SCOREP_USER_METRIC_UINT64(metric_gpu_mem, get_gpu_memory_used());
+    unsigned long long gpu_memory_used = 0;
+    if (aix_gpu_memory_metric_enabled() && distributor_->isGPUController()) {
+        write_service_timeline_event("service_gpu_memory_query_start", my_rank_, workgroup_comm, true);
+        gpu_memory_used = get_gpu_memory_used();
+        write_service_timeline_event("service_gpu_memory_query_end", my_rank_, workgroup_comm, true);
+    }
+    SCOREP_USER_METRIC_UINT64(metric_gpu_mem, gpu_memory_used);
     const auto tensor_elements = [](const std::vector<int64_t>& shape) {
         return std::accumulate(shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
     };
@@ -518,7 +548,13 @@ void AIxeleratorService<T>::inference()
     scatter_collective_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - scatter_start).count();
 #ifdef SCOREP
     SCOREP_USER_REGION_END( scatterHandle )
-    SCOREP_USER_METRIC_UINT64(metric_gpu_mem, get_gpu_memory_used());
+    gpu_memory_used = 0;
+    if (aix_gpu_memory_metric_enabled() && distributor_->isGPUController()) {
+        write_service_timeline_event("service_gpu_memory_query_start", my_rank_, workgroup_comm, true);
+        gpu_memory_used = get_gpu_memory_used();
+        write_service_timeline_event("service_gpu_memory_query_end", my_rank_, workgroup_comm, true);
+    }
+    SCOREP_USER_METRIC_UINT64(metric_gpu_mem, gpu_memory_used);
 #endif
 
     if (diagnostics_enabled) {

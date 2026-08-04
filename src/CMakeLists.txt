@@ -37,6 +37,9 @@ if(WITH_SCOREP)
         AIxeleratorServiceLib
             USER ON
             COMPILER OFF
+            MEMORY malloc
+            MPP mpi
+            THREADING pthread
     )
     target_link_libraries(AIxeleratorServiceLib PUBLIC nvidia-ml)
 endif()

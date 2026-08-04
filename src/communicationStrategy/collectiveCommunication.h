@@ -4,6 +4,7 @@
 #include "communicationStrategy/communicationStrategy.h"
 
 #include <mpi.h>
+#include <cstdint>
 #include <vector>
 
 template<typename T>
@@ -27,7 +28,10 @@ class CollectiveCommunication : public CommunicationStrategy<T>
 
     private:
         bool is_device_controller_;
+        bool controller_buffers_pinned_ = false;
 
+        int world_rank_;
+        int workgroup_rank_;
         int workgroup_size_;
 
         MPI_Comm work_group_comm_;
@@ -46,6 +50,7 @@ class CollectiveCommunication : public CommunicationStrategy<T>
         std::vector<int> output_displs_;
 
         std::vector<int> node_leaders_;
+        uint64_t pipelined_step_ = 0;
 };
 
 #endif

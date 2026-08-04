@@ -35,6 +35,8 @@ class TorchInference : public InferenceStrategy<T>
         torch::Tensor output_;
         torch::Tensor output_batch_;
         torch::Tensor output_gpu_;
+        bool input_is_pinned_ = false;
+        bool output_is_pinned_ = false;
         InferenceTiming last_timing_;
 };
 
