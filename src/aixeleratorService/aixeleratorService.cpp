@@ -27,10 +27,14 @@
 
 SCOREP_USER_REGION_DEFINE( gatherHandle )
 SCOREP_USER_REGION_DEFINE( deviceInferenceHandle )
+SCOREP_USER_REGION_DEFINE( controllerDeviceInferenceHandle )
 SCOREP_USER_REGION_DEFINE( hostInferenceHandle )
 SCOREP_USER_REGION_DEFINE( scatterHandle )
 #include "aixeleratorService/nvml.hpp"
 SCOREP_USER_METRIC_GLOBAL( metric_gpu_mem )
+SCOREP_USER_METRIC_GLOBAL( metric_aix_input_bytes )
+SCOREP_USER_METRIC_GLOBAL( metric_aix_output_bytes )
+SCOREP_USER_METRIC_GLOBAL( metric_aix_device_batches )
 #endif
 
 #include <numeric>
@@ -39,6 +43,23 @@ SCOREP_USER_METRIC_GLOBAL( metric_gpu_mem )
 #include <fstream>
 #include <optional>
 #include <list>
+#include <chrono>
+#include <filesystem>
+#include <iomanip>
+
+namespace {
+bool aix_diagnostics_enabled()
+{
+    const char* value = std::getenv("AIX_DIAGNOSTICS");
+    return value != nullptr && std::string(value) == "1";
+}
+
+bool aix_diagnostic_barriers_enabled()
+{
+    const char* value = std::getenv("AIX_DIAGNOSTIC_BARRIERS");
+    return value != nullptr && std::string(value) == "1";
+}
+} // namespace
 
 template<typename T>
 AIxeleratorService<T>::AIxeleratorService(
@@ -356,7 +377,7 @@ void AIxeleratorService<T>::initInferenceStrategy(std::pair<int64_t, int64_t> be
         std::vector<int64_t> input_shape_controller = communicator_->getInputShapeController();
         std::vector<int64_t> output_shape_controller = communicator_->getOutputShapeController();
 
-        if (batch_device > 0)
+        if (batch_device > 0 || (distributor_->isGPUController() && communicator_ && communicator_->getTotalInputSamples() > 0))
         {
             inferencing_device_->init(batchsize_, device_id, model_file_name_, input_shape_controller, input_data_controller, output_shape_controller, output_data_controller);
         }
@@ -368,14 +389,34 @@ template<typename T>
 void AIxeleratorService<T>::inference()
 {
 
+    const bool diagnostics_enabled = aix_diagnostics_enabled();
+    const bool diagnostic_barriers = diagnostics_enabled && aix_diagnostic_barriers_enabled();
+    const auto workgroup_comm = *distributor_->getWorkGroupCommunicator();
+    double gather_arrival_wait_s = 0.0;
+    double gather_collective_s = 0.0;
+    double device_cpu_s = 0.0;
+    double scatter_arrival_wait_s = 0.0;
+    double scatter_collective_s = 0.0;
+
+
 #ifdef SCOREP
     SCOREP_USER_REGION( "inference", SCOREP_USER_REGION_TYPE_FUNCTION )
     static bool metric_gpu_mem_init = false;
     if (!metric_gpu_mem_init) {
         SCOREP_USER_METRIC_INIT(metric_gpu_mem, "gpu_mem_used_bytes", "bytes", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
+        SCOREP_USER_METRIC_INIT(metric_aix_input_bytes, "aix_input_bytes", "bytes", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
+        SCOREP_USER_METRIC_INIT(metric_aix_output_bytes, "aix_output_bytes", "bytes", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
+        SCOREP_USER_METRIC_INIT(metric_aix_device_batches, "aix_device_batches", "batches", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
         metric_gpu_mem_init = true;
     }
     SCOREP_USER_METRIC_UINT64(metric_gpu_mem, get_gpu_memory_used());
+    const auto tensor_elements = [](const std::vector<int64_t>& shape) {
+        return std::accumulate(shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
+    };
+    SCOREP_USER_METRIC_UINT64(metric_aix_input_bytes,
+                              static_cast<uint64_t>(tensor_elements(input_shape_) * sizeof(T)));
+    SCOREP_USER_METRIC_UINT64(metric_aix_output_bytes,
+                              static_cast<uint64_t>(tensor_elements(output_shape_) * sizeof(T)));
 #endif
 
     if(my_rank_ == 0)
@@ -383,10 +424,17 @@ void AIxeleratorService<T>::inference()
 #ifdef SCOREP
     SCOREP_USER_REGION_BEGIN( gatherHandle, "gatherInputData", SCOREP_USER_REGION_TYPE_FUNCTION)
 #endif
+    if (diagnostic_barriers) {
+        const auto start = std::chrono::steady_clock::now();
+        MPI_Barrier(workgroup_comm);
+        gather_arrival_wait_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    }
+    const auto gather_start = std::chrono::steady_clock::now();
     if( communicator_ )
     {
         communicator_->gatherInputData();
     }
+    gather_collective_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - gather_start).count();
 #ifdef SCOREP
     SCOREP_USER_REGION_END( gatherHandle )
 #endif
@@ -396,9 +444,22 @@ void AIxeleratorService<T>::inference()
 #ifdef SCOREP
     SCOREP_USER_REGION_BEGIN( deviceInferenceHandle, "inferenceDevice", SCOREP_USER_REGION_TYPE_FUNCTION)
 #endif
-    if ( distributor_->isGPUController() && input_shape_device_[0] > 0)
+    if ( distributor_->isGPUController() && (input_shape_device_[0] > 0 || (communicator_ && communicator_->getTotalInputSamples() > 0)) )
     {
+#ifdef SCOREP
+        SCOREP_USER_REGION_BEGIN( controllerDeviceInferenceHandle, "aix_controller_inference", SCOREP_USER_REGION_TYPE_COMMON )
+        if (communicator_ && batchsize_ > 0) {
+            const auto total_samples = communicator_->getTotalInputSamples();
+            const auto batches = (total_samples + batchsize_ - 1) / batchsize_;
+            SCOREP_USER_METRIC_UINT64(metric_aix_device_batches, static_cast<uint64_t>(batches));
+        }
+#endif
+        const auto device_start = std::chrono::steady_clock::now();
         inferencing_device_->inference();
+        device_cpu_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - device_start).count();
+#ifdef SCOREP
+        SCOREP_USER_REGION_END( controllerDeviceInferenceHandle )
+#endif
     }
 #ifdef SCOREP
     SCOREP_USER_REGION_END( deviceInferenceHandle )
@@ -421,14 +482,45 @@ void AIxeleratorService<T>::inference()
 #ifdef SCOREP
     SCOREP_USER_REGION_BEGIN( scatterHandle, "scatterOutputData", SCOREP_USER_REGION_TYPE_FUNCTION)
 #endif
+    if (diagnostic_barriers) {
+        const auto start = std::chrono::steady_clock::now();
+        MPI_Barrier(workgroup_comm);
+        scatter_arrival_wait_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    }
+    const auto scatter_start = std::chrono::steady_clock::now();
     if( communicator_ )
     {
         communicator_->scatterOutputData();
     }
+    scatter_collective_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - scatter_start).count();
 #ifdef SCOREP
     SCOREP_USER_REGION_END( scatterHandle )
     SCOREP_USER_METRIC_UINT64(metric_gpu_mem, get_gpu_memory_used());
 #endif
+
+    if (diagnostics_enabled) {
+        static uint64_t diagnostic_call = 0;
+        int world_rank = -1;
+        MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+        const std::string directory = std::getenv("AIX_DIAGNOSTICS_DIR") ? std::getenv("AIX_DIAGNOSTICS_DIR") : "aix_diagnostics";
+        std::filesystem::create_directories(directory);
+        const std::filesystem::path file = std::filesystem::path(directory) / ("aix_rank_" + std::to_string(world_rank) + ".csv");
+        const bool write_header = !std::filesystem::exists(file);
+        std::ofstream stream(file, std::ios::app);
+        if (write_header) {
+            stream << "call,world_rank,workgroup_rank,is_controller,diagnostic_barriers,"
+                   << "gather_arrival_wait_s,gather_collective_s,device_cpu_s,"
+                   << "h2d_gpu_ms,forward_gpu_ms,d2h_gpu_ms,device_batches,"
+                   << "scatter_arrival_wait_s,scatter_collective_s\n";
+        }
+        const InferenceTiming timing = distributor_->isGPUController() ? inferencing_device_->getLastTiming() : InferenceTiming{};
+        stream << std::setprecision(12)
+               << diagnostic_call++ << ',' << world_rank << ',' << my_rank_ << ','
+               << (distributor_->isGPUController() ? 1 : 0) << ',' << (diagnostic_barriers ? 1 : 0) << ','
+               << gather_arrival_wait_s << ',' << gather_collective_s << ',' << device_cpu_s << ','
+               << timing.h2d_gpu_ms << ',' << timing.forward_gpu_ms << ',' << timing.d2h_gpu_ms << ',' << timing.device_batches << ','
+               << scatter_arrival_wait_s << ',' << scatter_collective_s << '\n';
+    }
 }
 
 template class AIxeleratorService<float>;

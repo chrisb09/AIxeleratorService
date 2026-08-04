@@ -55,3 +55,16 @@ INSTALL-SCOREP/
 # Slurm build logs
 *.err
 build-aix.*.out
+
+# Build and install directories
+INSTALL/
+INSTALL-*/
+build/
+build_*/
+build_aix/
+build_dir/
+build_scorep/
+
+# Score-P profiling output
+scorep-*/
+scorep_*/

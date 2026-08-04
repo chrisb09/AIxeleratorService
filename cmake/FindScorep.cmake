@@ -364,9 +364,10 @@ function(scorep_instrument_target _target)
     )
 
     # Determine include paths
-    execute_process(COMMAND ${SCOREP_CONFIG_EXECUTABLE} "--cppflags" OUTPUT_VARIABLE SCOREP_CONFIG_FLAGS)
+    execute_process(COMMAND ${SCOREP_CONFIG_EXECUTABLE} "--cppflags" ${SCOREP_CONFIG_TARGET_FLAGS} OUTPUT_VARIABLE SCOREP_CONFIG_FLAGS)
     string(REGEX MATCHALL "-I[^ ]*" SCOREP_CONFIG_INCLUDES "${SCOREP_CONFIG_FLAGS}")
     foreach(inc ${SCOREP_CONFIG_INCLUDES})
+        string(STRIP ${inc} inc)
         string(SUBSTRING ${inc} 2 -1 inc)
         list(APPEND SCOREP_INCLUDE_DIRS ${inc})
     endforeach()
@@ -406,7 +407,9 @@ if(NOT SCOREP_CONFIG_EXECUTABLE OR NOT SCOREP_INFO_EXECUTABLE)
 else(NOT SCOREP_CONFIG_EXECUTABLE OR NOT SCOREP_INFO_EXECUTABLE)
 
     execute_process(COMMAND ${SCOREP_CONFIG_EXECUTABLE} "--version" OUTPUT_VARIABLE SCOREP_VERSION)
+    string(STRIP "${SCOREP_VERSION}" SCOREP_VERSION)
     execute_process(COMMAND ${SCOREP_CONFIG_EXECUTABLE} "--prefix" OUTPUT_VARIABLE _SCOREP_ROOT_DIR)
+    string(STRIP "${_SCOREP_ROOT_DIR}" _SCOREP_ROOT_DIR)
     set(SCOREP_ROOT_DIR "${_SCOREP_ROOT_DIR}" CACHE PATH "Root directory of Score-P installation.")
     mark_as_advanced(SCOREP_ROOT_DIR)
 
@@ -496,10 +499,12 @@ endif()
 # Exported Targets
 ################################################################################
 
-add_library(Scorep::Plugin INTERFACE IMPORTED)
-set_target_properties(Scorep::Plugin PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${SCOREP_INCLUDE_DIRS}"
-)
+if(NOT TARGET Scorep::Plugin)
+    add_library(Scorep::Plugin INTERFACE IMPORTED)
+    set_target_properties(Scorep::Plugin PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${SCOREP_INCLUDE_DIRS}"
+    )
+endif()
 
 include (FindPackageHandleStandardArgs)
 FIND_PACKAGE_HANDLE_STANDARD_ARGS(Scorep
