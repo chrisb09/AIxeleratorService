@@ -8,6 +8,7 @@
 
 #include "communicationStrategy/collectiveCommunication.h"
 #include "communicationStrategy/nonBlockingPtoPCommunication.h"
+#include "utils/p2pTimeline.h"
 
 #ifdef WITH_TORCH
 #include "inferenceStrategy/torchInference/torchInference.h"
@@ -25,11 +26,17 @@
 #ifdef SCOREP
 #include <scorep/SCOREP_User.h>
 
+SCOREP_USER_REGION_DEFINE( setupHandle )
 SCOREP_USER_REGION_DEFINE( gatherHandle )
+SCOREP_USER_REGION_DEFINE( gatherMpiHandle )
 SCOREP_USER_REGION_DEFINE( deviceInferenceHandle )
 SCOREP_USER_REGION_DEFINE( controllerDeviceInferenceHandle )
+SCOREP_USER_REGION_DEFINE( controllerPipelinedInferenceHandle )
 SCOREP_USER_REGION_DEFINE( hostInferenceHandle )
+SCOREP_USER_REGION_DEFINE( workerWaitHandle )
 SCOREP_USER_REGION_DEFINE( scatterHandle )
+SCOREP_USER_REGION_DEFINE( scatterMpiHandle )
+SCOREP_USER_REGION_DEFINE( postScatterHandle )
 #include "aixeleratorService/nvml.hpp"
 SCOREP_USER_METRIC_GLOBAL( metric_gpu_mem )
 SCOREP_USER_METRIC_GLOBAL( metric_aix_input_bytes )
@@ -59,6 +66,29 @@ bool aix_diagnostic_barriers_enabled()
     const char* value = std::getenv("AIX_DIAGNOSTIC_BARRIERS");
     return value != nullptr && std::string(value) == "1";
 }
+
+#ifdef SCOREP
+bool aix_gpu_memory_metric_enabled()
+{
+    const char* value = std::getenv("AIX_SCOREP_GPU_MEMORY_METRIC");
+    return value != nullptr && std::string(value) == "1";
+}
+#endif
+
+void write_service_timeline_event(const char* event, int world_rank, MPI_Comm workgroup_comm,
+                                  bool is_controller)
+{
+    const char* directory = std::getenv("AIX_P2P_TIMELINE_DIR");
+    const char* step_text = std::getenv("AIX_P2P_TIMELINE_STEP");
+    if (!directory || !step_text) {
+        return;
+    }
+    int workgroup_rank = -1;
+    MPI_Comm_rank(workgroup_comm, &workgroup_rank);
+    aixelerator_service::utils::writeP2PTimelineEvent(
+        static_cast<uint64_t>(std::strtoll(step_text, nullptr, 10)),
+        world_rank, workgroup_rank, is_controller, event);
+}
 } // namespace
 
 template<typename T>
@@ -68,13 +98,22 @@ AIxeleratorService<T>::AIxeleratorService(
     std::vector<int64_t> output_shape, T* output_data,
     int batchsize, MPI_Comm app_comm,
     bool enable_hybrid,
-    std::optional<float> host_fraction
+    std::optional<float> host_fraction,
+    CommunicationMode communication_mode
 )   :   model_file_name_{model_file}, 
         input_shape_{input_shape}, input_data_{input_data}, 
         output_shape_{output_shape}, output_data_{output_data}, 
         batchsize_{batchsize}, 
-        enable_hybrid_{enable_hybrid}, host_fraction_{host_fraction}
+        enable_hybrid_{enable_hybrid},
+        pipelined_{communication_mode == CommunicationMode::Pipelined ||
+                   (std::getenv("AIX_COMMUNICATION_MODE") != nullptr &&
+                    std::string(std::getenv("AIX_COMMUNICATION_MODE")) == "pipelined")},
+        communication_mode_{communication_mode},
+        host_fraction_{host_fraction}
 {
+    if (communication_mode_ == CommunicationMode::Collective && pipelined_) {
+        communication_mode_ = CommunicationMode::Pipelined;
+    }
     if (std::getenv("DUMP_TENSOR_DIR")) {
         std::cerr << "AIX_CTOR this=" << (void*)this << " input_data_=" << (void*)input_data_ << " input_data_param=" << (void*)input_data << std::endl;
     }
@@ -380,6 +419,7 @@ void AIxeleratorService<T>::initInferenceStrategy(std::pair<int64_t, int64_t> be
         if (batch_device > 0 || (distributor_->isGPUController() && communicator_ && communicator_->getTotalInputSamples() > 0))
         {
             inferencing_device_->init(batchsize_, device_id, model_file_name_, input_shape_controller, input_data_controller, output_shape_controller, output_data_controller);
+            inferencing_device_->setControllerDirectBuffers(input_data_, output_data_);
         }
     }
 
@@ -398,9 +438,9 @@ void AIxeleratorService<T>::inference()
     double scatter_arrival_wait_s = 0.0;
     double scatter_collective_s = 0.0;
 
-
 #ifdef SCOREP
     SCOREP_USER_REGION( "inference", SCOREP_USER_REGION_TYPE_FUNCTION )
+    SCOREP_USER_REGION_BEGIN( setupHandle, "aix_collective_setup", SCOREP_USER_REGION_TYPE_COMMON )
     static bool metric_gpu_mem_init = false;
     if (!metric_gpu_mem_init) {
         SCOREP_USER_METRIC_INIT(metric_gpu_mem, "gpu_mem_used_bytes", "bytes", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
@@ -409,7 +449,13 @@ void AIxeleratorService<T>::inference()
         SCOREP_USER_METRIC_INIT(metric_aix_device_batches, "aix_device_batches", "batches", SCOREP_USER_METRIC_TYPE_UINT64, SCOREP_USER_METRIC_CONTEXT_CALLPATH);
         metric_gpu_mem_init = true;
     }
-    SCOREP_USER_METRIC_UINT64(metric_gpu_mem, get_gpu_memory_used());
+    unsigned long long gpu_memory_used = 0;
+    if (aix_gpu_memory_metric_enabled() && distributor_->isGPUController()) {
+        write_service_timeline_event("service_gpu_memory_query_start", my_rank_, workgroup_comm, true);
+        gpu_memory_used = get_gpu_memory_used();
+        write_service_timeline_event("service_gpu_memory_query_end", my_rank_, workgroup_comm, true);
+    }
+    SCOREP_USER_METRIC_UINT64(metric_gpu_mem, gpu_memory_used);
     const auto tensor_elements = [](const std::vector<int64_t>& shape) {
         return std::accumulate(shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
     };
@@ -417,7 +463,43 @@ void AIxeleratorService<T>::inference()
                               static_cast<uint64_t>(tensor_elements(input_shape_) * sizeof(T)));
     SCOREP_USER_METRIC_UINT64(metric_aix_output_bytes,
                               static_cast<uint64_t>(tensor_elements(output_shape_) * sizeof(T)));
+    SCOREP_USER_REGION_END( setupHandle )
 #endif
+
+    if (pipelined_ && enable_hybrid_) {
+        throw std::runtime_error("Pipelined communication does not support hybrid host/device inference.");
+    }
+
+    if (pipelined_ && communicator_) {
+        if (distributor_->isGPUController() && !inferencing_device_) {
+            throw std::runtime_error("Pipelined communication requires a controller device inference strategy.");
+        }
+        PipelinedInferenceExecutor executor;
+        executor.infer_range = [this](int64_t start_sample, int64_t sample_count) {
+#ifdef SCOREP
+            SCOREP_USER_REGION_BEGIN(controllerPipelinedInferenceHandle, "aix_controller_pipelined_inference", SCOREP_USER_REGION_TYPE_COMMON)
+#endif
+            inferencing_device_->inferenceRange(start_sample, sample_count);
+#ifdef SCOREP
+            SCOREP_USER_REGION_END(controllerPipelinedInferenceHandle)
+#endif
+        };
+        if (distributor_->isGPUController() && inferencing_device_->supportsRangePipeline()) {
+            executor.can_submit = [this] { return inferencing_device_->canSubmitRangePipeline(); };
+            executor.max_samples = [this] { return inferencing_device_->maxRangePipelineSamples(); };
+            executor.submit = [this](int64_t start_sample, int64_t sample_count, int first_rank, int end_rank) {
+                return inferencing_device_->submitRangePipeline(start_sample, sample_count, first_rank, end_rank);
+            };
+            executor.complete = [this](uint64_t request_id) {
+                return inferencing_device_->rangePipelineComplete(request_id);
+            };
+            executor.release = [this](uint64_t request_id) {
+                inferencing_device_->releaseRangePipeline(request_id);
+            };
+        }
+        communicator_->pipelinedExchange(executor);
+        return;
+    }
 
     if(my_rank_ == 0)
         std::cout << "AIxeleratorService: gathering input data" << std::endl;
@@ -432,7 +514,13 @@ void AIxeleratorService<T>::inference()
     const auto gather_start = std::chrono::steady_clock::now();
     if( communicator_ )
     {
+#ifdef SCOREP
+        SCOREP_USER_REGION_BEGIN( gatherMpiHandle, "aix_collective_gather_mpi", SCOREP_USER_REGION_TYPE_COMMON)
+#endif
         communicator_->gatherInputData();
+#ifdef SCOREP
+        SCOREP_USER_REGION_END( gatherMpiHandle )
+#endif
     }
     gather_collective_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - gather_start).count();
 #ifdef SCOREP
@@ -477,9 +565,18 @@ void AIxeleratorService<T>::inference()
 #ifdef SCOREP
     SCOREP_USER_REGION_END( hostInferenceHandle )
 #endif
+
+#ifdef SCOREP
+    if (!distributor_->isGPUController()) {
+        SCOREP_USER_REGION_BEGIN( workerWaitHandle, "aix_collective_worker_wait_for_controller", SCOREP_USER_REGION_TYPE_COMMON)
+    }
+#endif
     if(my_rank_ == 0)
         std::cout << "AIxeleratorService: scattering output data" << std::endl;
 #ifdef SCOREP
+    if (!distributor_->isGPUController()) {
+        SCOREP_USER_REGION_END( workerWaitHandle )
+    }
     SCOREP_USER_REGION_BEGIN( scatterHandle, "scatterOutputData", SCOREP_USER_REGION_TYPE_FUNCTION)
 #endif
     if (diagnostic_barriers) {
@@ -490,12 +587,21 @@ void AIxeleratorService<T>::inference()
     const auto scatter_start = std::chrono::steady_clock::now();
     if( communicator_ )
     {
+#ifdef SCOREP
+        SCOREP_USER_REGION_BEGIN( scatterMpiHandle, "aix_collective_scatter_mpi", SCOREP_USER_REGION_TYPE_COMMON)
+#endif
         communicator_->scatterOutputData();
+#ifdef SCOREP
+        SCOREP_USER_REGION_END( scatterMpiHandle )
+#endif
     }
     scatter_collective_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - scatter_start).count();
 #ifdef SCOREP
     SCOREP_USER_REGION_END( scatterHandle )
-    SCOREP_USER_METRIC_UINT64(metric_gpu_mem, get_gpu_memory_used());
+    SCOREP_USER_REGION_BEGIN( postScatterHandle, "aix_collective_post_scatter", SCOREP_USER_REGION_TYPE_COMMON)
+    if (distributor_->isGPUController()) {
+        SCOREP_USER_METRIC_UINT64(metric_gpu_mem, get_gpu_memory_used());
+    }
 #endif
 
     if (diagnostics_enabled) {
@@ -521,6 +627,9 @@ void AIxeleratorService<T>::inference()
                << timing.h2d_gpu_ms << ',' << timing.forward_gpu_ms << ',' << timing.d2h_gpu_ms << ',' << timing.device_batches << ','
                << scatter_arrival_wait_s << ',' << scatter_collective_s << '\n';
     }
+#ifdef SCOREP
+    SCOREP_USER_REGION_END( postScatterHandle )
+#endif
 }
 
 template class AIxeleratorService<float>;

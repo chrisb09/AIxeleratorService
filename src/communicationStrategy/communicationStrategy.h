@@ -3,6 +3,23 @@
 
 #include <vector>
 #include <cstdint>
+#include <functional>
+#include <stdexcept>
+
+struct PipelinedInferenceExecutor
+{
+    std::function<void(int64_t, int64_t)> infer_range;
+    std::function<bool()> can_submit;
+    std::function<int64_t()> max_samples;
+    std::function<uint64_t(int64_t, int64_t, int, int)> submit;
+    std::function<bool(uint64_t)> complete;
+    std::function<void(uint64_t)> release;
+
+    bool supportsRangePipeline() const
+    {
+        return can_submit && max_samples && submit && complete && release;
+    }
+};
 
 template<typename T>
 class CommunicationStrategy
@@ -12,6 +29,10 @@ class CommunicationStrategy
 
         virtual void gatherInputData() = 0;
         virtual void scatterOutputData() = 0;
+        virtual void pipelinedExchange(const PipelinedInferenceExecutor&)
+        {
+            throw std::runtime_error("The selected communication strategy does not support pipelined exchange.");
+        }
 
         T* getInputDataController(){ return input_data_controller_; }
         T* getOutputDataController(){ return output_data_controller_; }

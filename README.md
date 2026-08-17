@@ -8,10 +8,26 @@ For this purpose It hides complexities that arise from the usage of MPI in a dis
 Moreover it abstracts from the concrete APIs of different ML/DL frameworks (e.g., PyTorch or TensorFlow) by providing a convenient API.
 Application developers just need to pass in a (trained) ML/DL model and associated data and the rest will be taken care of by the AIxeleratorService.   
 
-This version of the AIxeleratorService offers different `InferenceMode`s (as defined in `aixeleratorService.h`):
-* inference purely on CPUs (`AIX_CPU`)
-* inference purely on GPUs (`AIX_GPU`)
-* hybrid inference on CPUs + GPUs (`AIX_HYBRID`)
+This version of the AIxeleratorService offers configurable communication and inference modes:
+* **Communication Modes** (`CommunicationMode`):
+  * `CommunicationMode::Collective` (default): Standard collective MPI gather/scatter exchange.
+  * `CommunicationMode::Pipelined`: Overlapped P2P credit-based exchange with multi-stream CUDA range-pipelined inference.
+* **Inference Modes**:
+  * inference purely on CPUs (`AIX_CPU`)
+  * inference purely on GPUs (`AIX_GPU`)
+  * hybrid inference on CPUs + GPUs (`AIX_HYBRID`)
+
+### Pipelined Communication & Threading Model
+When `CommunicationMode::Pipelined` is selected:
+* **MPI Thread Safety**: AIxeleratorService queries the MPI runtime via `MPI_Query_thread()`.
+  * If the application initialized MPI with `MPI_THREAD_MULTIPLE` (e.g. `MPI_Init_thread(..., MPI_THREAD_MULTIPLE, ...)`), a dedicated background progress thread is spawned to overlap P2P transfers while GPU inference runs.
+  * If MPI is initialized at `MPI_THREAD_SINGLE`, `MPI_THREAD_FUNNELED`, or `MPI_THREAD_SERIALIZED`, AIxeleratorService automatically falls back to synchronous polling on the calling controller thread, preventing multi-threaded MPI violations while preserving functional equivalence.
+* **Backend Prerequisites**: Pipelined communication requires a GPU controller running PyTorch (`libtorch`) with the CUDA runtime enabled (`AIX_HAS_CUDA_RUNTIME`).
+* **Tuning Options (Environment Variables)**:
+  * `AIX_P2P_INITIAL_CREDITS`: Number of initial buffer grants per worker (default: `1`).
+  * `AIX_P2P_RANGE_PIPELINE_DEPTH`: CUDA stream pipeline queue depth (default: `3`).
+  * `AIX_P2P_ASYNC_CONTROLLER`: Set to `0` to force synchronous controller execution even under `MPI_THREAD_MULTIPLE`.
+  * `AIX_P2P_TIMELINE_DIR`: Directory path to record JSON/CSV event timelines for transfer/inference overlap visualization.
 
 Supported architectures:
 * x86 CPUs (tested on Intel Xeon Skylake, Intel Xeon Sapphire Rapids)

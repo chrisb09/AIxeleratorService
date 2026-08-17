@@ -27,9 +27,12 @@ target_include_directories(
             ${PROJECT_SOURCE_DIR}/src/
 )
 
+find_package(Threads REQUIRED)
+
 target_link_libraries(
     AIxeleratorServiceLib 
     PUBLIC ${MPI_LIBRARIES}
+           Threads::Threads
 )
 
 if(WITH_SCOREP)
@@ -37,6 +40,9 @@ if(WITH_SCOREP)
         AIxeleratorServiceLib
             USER ON
             COMPILER OFF
+            MEMORY malloc
+            MPP mpi
+            THREADING pthread
     )
     target_link_libraries(AIxeleratorServiceLib PUBLIC nvidia-ml)
 endif()

@@ -41,6 +41,42 @@ interface
         type(C_ptr) :: aixelerator
     end function
 
+    function createAIxeleratorServiceDoubleWithMode_C(model_file, input_shape, num_input_dims, input_data, &
+        output_shape, num_output_dims, output_data, batchsize, app_comm, communication_mode) &
+        result(aixelerator) bind(C, name="createAIxeleratorServiceDoubleWithMode_F")
+        import
+        character(kind=C_char) :: model_file(*)
+        integer(C_int64_t) :: input_shape(*)
+        integer(C_int), value :: num_input_dims
+        REAL(C_double) :: input_data(*)
+        integer(C_int64_t) :: output_shape(*)
+        integer(C_int), value :: num_output_dims
+        REAL(C_double) :: output_data(*)
+        integer(C_int), value :: batchsize
+        integer(C_int), value :: app_comm
+        integer(C_int), value :: communication_mode
+
+        type(C_ptr) :: aixelerator
+    end function
+
+    function createAIxeleratorServiceFloatWithMode_C(model_file, input_shape, num_input_dims, input_data, &
+        output_shape, num_output_dims, output_data, batchsize, app_comm, communication_mode) &
+        result(aixelerator) bind(C, name="createAIxeleratorServiceFloatWithMode_F")
+        import
+        character(kind=C_char) :: model_file(*)
+        integer(C_int64_t) :: input_shape(*)
+        integer(C_int), value :: num_input_dims
+        REAL(C_float) :: input_data(*)
+        integer(C_int64_t) :: output_shape(*)
+        integer(C_int), value :: num_output_dims
+        REAL(C_float) :: output_data(*)
+        integer(C_int), value :: batchsize
+        integer(C_int), value :: app_comm
+        integer(C_int), value :: communication_mode
+
+        type(C_ptr) :: aixelerator
+    end function
+
     subroutine deleteAIxeleratorServiceDouble_C(aixelerator) bind(C, name="deleteAIxeleratorServiceDouble")
         import
         type(C_ptr), value :: aixelerator

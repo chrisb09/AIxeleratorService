@@ -1,3 +1,5 @@
+find_package(Threads REQUIRED)
+
 if(WITH_TORCH)
     list(APPEND TORCH_TESTS "testTorchInference.cpp")
     foreach(TEST ${TORCH_TESTS})
@@ -12,7 +14,7 @@ if(WITH_TORCH)
         )
         target_include_directories(${UNITTEST_NAME}.x PRIVATE ${PROJECT_SOURCE_DIR}/src)
         target_include_directories(${UNITTEST_NAME}.x PRIVATE ${TORCH_INCLUDE_DIRS})
-        target_link_libraries(${UNITTEST_NAME}.x PRIVATE ${TORCH_LIBRARIES})
+        target_link_libraries(${UNITTEST_NAME}.x PRIVATE ${TORCH_LIBRARIES} Threads::Threads)
         if(AIX_CUPTI_LIB)
             target_link_libraries(${UNITTEST_NAME}.x PRIVATE ${AIX_CUPTI_LIB})
         endif()
@@ -214,7 +216,7 @@ foreach(TEST ${DISTRIBUTION_TESTS})
     endif()
     target_include_directories(${UNITTEST_NAME}.x PRIVATE ${PROJECT_SOURCE_DIR}/src)
     target_include_directories(${UNITTEST_NAME}.x PRIVATE ${MPI_INCLUDE_PATH})
-    target_link_libraries(${UNITTEST_NAME}.x PRIVATE ${MPI_LIBRARIES})
+    target_link_libraries(${UNITTEST_NAME}.x PRIVATE ${MPI_LIBRARIES} Threads::Threads)
     install(
             TARGETS ${UNITTEST_NAME}.x
             RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin    
@@ -278,7 +280,7 @@ foreach(TEST ${AIXELERATOR_TESTS})
     endif()
     target_include_directories(${UNITTEST_NAME}.x PRIVATE ${PROJECT_SOURCE_DIR}/src)
     target_include_directories(${UNITTEST_NAME}.x PRIVATE ${MPI_INCLUDE_PATH})
-    target_link_libraries(${UNITTEST_NAME}.x PRIVATE ${MPI_LIBRARIES})
+    target_link_libraries(${UNITTEST_NAME}.x PRIVATE ${MPI_LIBRARIES} Threads::Threads)
     install(
         TARGETS ${UNITTEST_NAME}.x
         RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin    
@@ -341,7 +343,7 @@ foreach(TEST ${AIXELERATOR_TESTS_HYBRID})
     endif()
     target_include_directories(${UNITTEST_NAME}.x PRIVATE ${PROJECT_SOURCE_DIR}/src)
     target_include_directories(${UNITTEST_NAME}.x PRIVATE ${MPI_INCLUDE_PATH})
-    target_link_libraries(${UNITTEST_NAME}.x PRIVATE ${MPI_LIBRARIES})
+    target_link_libraries(${UNITTEST_NAME}.x PRIVATE ${MPI_LIBRARIES} Threads::Threads)
 endforeach(TEST)
 
 
@@ -488,13 +490,13 @@ if(WITH_SCOREP)
         MPP "mpi" 
     )  
 endif()
-target_include_directories(testAIxeleratorService_interfaceC.x PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_include_directories(testAIxeleratorService_interfaceC.x PRIVATE  ${MPI_INCLUDE_PATH} )
-target_link_libraries(testAIxeleratorService_interfaceC.x PRIVATE  ${MPI_LIBRARIES} )
-install(
-    TARGETS testAIxeleratorService_interfaceC.x
-    RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin    
-)
+    target_include_directories(testAIxeleratorService_interfaceC.x PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_include_directories(testAIxeleratorService_interfaceC.x PRIVATE  ${MPI_INCLUDE_PATH} )
+    target_link_libraries(testAIxeleratorService_interfaceC.x PRIVATE  ${MPI_LIBRARIES} Threads::Threads )
+    install(
+        TARGETS testAIxeleratorService_interfaceC.x
+        RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
+    )
 
 if(WITH_FORTRAN_INTERFACE)
 message(STATUS "Creating AIxeleratorService Fortran Interface Test")
@@ -546,7 +548,7 @@ if(WITH_SCOREP)
 endif()
 target_include_directories(testAIxeleratorService_interfaceF.x PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_include_directories(testAIxeleratorService_interfaceF.x PRIVATE  ${MPI_INCLUDE_PATH} )
-target_link_libraries(testAIxeleratorService_interfaceF.x PRIVATE  ${MPI_LIBRARIES} MPI::MPI_Fortran)
+target_link_libraries(testAIxeleratorService_interfaceF.x PRIVATE  ${MPI_LIBRARIES} MPI::MPI_Fortran Threads::Threads)
 set_target_properties(testAIxeleratorService_interfaceF.x PROPERTIES LINKER_LANGUAGE Fortran)
 install(
     TARGETS testAIxeleratorService_interfaceF.x

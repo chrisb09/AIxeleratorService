@@ -4,6 +4,7 @@
 #include "communicationStrategy/communicationStrategy.h"
 
 #include <mpi.h>
+#include <cstdint>
 #include <vector>
 
 template<typename T>
@@ -20,16 +21,21 @@ class CollectiveCommunication : public CommunicationStrategy<T>
 
         void gatherInputData() override;
         void scatterOutputData() override;
+        void pipelinedExchange(const PipelinedInferenceExecutor& executor) override;
 
         void setInputData(int input_sendcount, T* input_data);
         void setOutputData(int output_sendcount, T* output_data);
 
     private:
         bool is_device_controller_;
+        bool controller_buffers_pinned_ = false;
 
+        int world_rank_;
+        int workgroup_rank_;
         int workgroup_size_;
 
         MPI_Comm work_group_comm_;
+        MPI_Comm pipelined_comm_;
         MPI_Datatype dtype_;
         T* input_data_worker_;
 
@@ -42,6 +48,9 @@ class CollectiveCommunication : public CommunicationStrategy<T>
         int output_sendcount_;
         std::vector<int> output_recvcounts_;
         std::vector<int> output_displs_;
+
+        std::vector<int> node_leaders_;
+        uint64_t pipelined_step_ = 0;
 };
 
 #endif

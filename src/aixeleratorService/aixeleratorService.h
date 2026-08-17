@@ -17,6 +17,12 @@ typedef enum AIFramework
     AIX_UNKNOWN
 } AIFramework;
 
+enum class CommunicationMode
+{
+    Collective = 0,
+    Pipelined = 1
+};
+
 template<typename T>
 class AIxeleratorService
 {
@@ -28,7 +34,8 @@ class AIxeleratorService
             std::vector<int64_t> output_shape, T* output_data,
             int batchsize, MPI_Comm app_comm,
             bool enable_hybrid = false,
-            std::optional<float> host_fraction = std::nullopt
+            std::optional<float> host_fraction = std::nullopt,
+            CommunicationMode communication_mode = CommunicationMode::Collective
         );
 
         ~AIxeleratorService();
@@ -38,6 +45,7 @@ class AIxeleratorService
         void setBatchsize(int batchsize){ batchsize_ = batchsize; }
 
         void setDebugTag(std::string tag){ debug_tag_ = tag; }
+        CommunicationMode getCommunicationMode() const { return communication_mode_; }
 
     private:
         int my_rank_;
@@ -62,6 +70,8 @@ class AIxeleratorService
         T* output_data_device_;
         int batchsize_; // TODO: remove this
         bool enable_hybrid_;
+        bool pipelined_;
+        CommunicationMode communication_mode_;
         std::optional<float> host_fraction_;
 
         AIFramework framework_;

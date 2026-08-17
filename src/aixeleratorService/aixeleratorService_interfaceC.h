@@ -21,6 +21,18 @@ extern "C" {
         int64_t* output_shape, int num_output_dims, float* output_data,
         int batchsize, int app_comm
     );
+    AIxeleratorServiceHandle createAIxeleratorServiceDoubleWithMode_F(
+        char* model_file,
+        int64_t* input_shape, int num_input_dims, double* input_data,
+        int64_t* output_shape, int num_output_dims, double* output_data,
+        int batchsize, int app_comm, int communication_mode
+    );
+    AIxeleratorServiceHandle createAIxeleratorServiceFloatWithMode_F(
+        char* model_file,
+        int64_t* input_shape, int num_input_dims, float* input_data,
+        int64_t* output_shape, int num_output_dims, float* output_data,
+        int batchsize, int app_comm, int communication_mode
+    );
 
     typedef void* AIxeleratorServiceHandle;
     AIxeleratorServiceHandle createAIxeleratorServiceDouble(
@@ -34,6 +46,18 @@ extern "C" {
         int64_t* input_shape, int num_input_dims, float* input_data,
         int64_t* output_shape, int num_output_dims, float* output_data,
         int batchsize, MPI_Comm app_comm
+    );
+    AIxeleratorServiceHandle createAIxeleratorServiceDoubleWithMode(
+        char* model_file,
+        int64_t* input_shape, int num_input_dims, double* input_data,
+        int64_t* output_shape, int num_output_dims, double* output_data,
+        int batchsize, MPI_Comm app_comm, int communication_mode
+    );
+    AIxeleratorServiceHandle createAIxeleratorServiceFloatWithMode(
+        char* model_file,
+        int64_t* input_shape, int num_input_dims, float* input_data,
+        int64_t* output_shape, int num_output_dims, float* output_data,
+        int batchsize, MPI_Comm app_comm, int communication_mode
     );
 
     void deleteAIxeleratorServiceDouble(AIxeleratorServiceHandle aixelerator);
