@@ -40,10 +40,11 @@ if(WITH_SCOREP)
         AIxeleratorServiceLib
             USER ON
             COMPILER OFF
-            MEMORY malloc
+            MEMORY none
             MPP mpi
-            THREADING pthread
+            THREADING none
     )
+    target_compile_definitions(AIxeleratorServiceLib PRIVATE SCOREP SCOREP_USER_ENABLE)
     target_link_libraries(AIxeleratorServiceLib PUBLIC nvidia-ml)
 endif()
 

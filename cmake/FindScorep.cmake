@@ -356,11 +356,12 @@ function(scorep_instrument_target _target)
     foreach(flag ${_SCOREP_CPP_FLAGS})
         string(STRIP ${flag} flag)
         if(${flag} MATCHES "^-D")
-            list(APPEND SCOREP_COMPILE_DEFINITIONS ${flag})
+            string(SUBSTRING ${flag} 2 -1 def)
+            list(APPEND SCOREP_COMPILE_DEFINITIONS ${def})
         endif()
     endforeach()
     set_property(TARGET ${_target} APPEND
-        PROPERTY COMPILE_DEFINITIONS "${SCOREP_COMPILE_DEFINITIONS_DIRS}"
+        PROPERTY COMPILE_DEFINITIONS "${SCOREP_COMPILE_DEFINITIONS}"
     )
 
     # Determine include paths
@@ -410,7 +411,8 @@ else(NOT SCOREP_CONFIG_EXECUTABLE OR NOT SCOREP_INFO_EXECUTABLE)
     string(STRIP "${SCOREP_VERSION}" SCOREP_VERSION)
     execute_process(COMMAND ${SCOREP_CONFIG_EXECUTABLE} "--prefix" OUTPUT_VARIABLE _SCOREP_ROOT_DIR)
     string(STRIP "${_SCOREP_ROOT_DIR}" _SCOREP_ROOT_DIR)
-    set(SCOREP_ROOT_DIR "${_SCOREP_ROOT_DIR}" CACHE PATH "Root directory of Score-P installation.")
+    set(SCOREP_ROOT_DIR "${_SCOREP_ROOT_DIR}" CACHE PATH "Root directory of Score-P installation." FORCE)
+    set(SCOREP_ROOT_DIR "${_SCOREP_ROOT_DIR}")
     mark_as_advanced(SCOREP_ROOT_DIR)
 
     #[=========================================================================[
@@ -471,9 +473,9 @@ else(NOT SCOREP_CONFIG_EXECUTABLE OR NOT SCOREP_INFO_EXECUTABLE)
         mark_as_advanced(SCOREP_${_keyword}_SYSTEM)
     endmacro()
 
-    _scorep_define_enable_property(COMPILER ON "Default automatic compiler-based instrumentation for targets.")
+    _scorep_define_enable_property(COMPILER OFF "Default automatic compiler-based instrumentation for targets.")
     _scorep_define_enable_property(KOKKOS OFF "Default Kokkos instrumentation for targets.")
-    _scorep_define_enable_property(USER OFF "Default manual user-instrumentation for targets.")
+    _scorep_define_enable_property(USER ON "Default manual user-instrumentation for targets.")
     _scorep_define_enable_property(CUDA OFF "Default CUDA instrumentation for targets.")
     list(APPEND SUPPORTED_IO_SYSTEMS "none")
     _scorep_test_and_append_system_support(SUPPORTED_IO_SYSTEMS Scorep_POSIXIO_FOUND "posix")

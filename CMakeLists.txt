@@ -468,7 +468,7 @@ if(WITH_SOL)
 endif()
 
 if(WITH_SCOREP)
-  add_compile_options("-DSCOREP")
+  add_compile_options("-DSCOREP" "-DSCOREP_USER_ENABLE")
   message(STATUS "AIxeleratorService will be build with Score-P intrumentation!")
 endif()
 
