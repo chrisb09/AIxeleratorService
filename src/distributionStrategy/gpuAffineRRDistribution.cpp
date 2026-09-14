@@ -77,21 +77,87 @@ void GPUAffineRRDistribution::createWorkgroups()
     is_gpu_controller_ = false;
     my_gpu_device_ = -1;
 
-    // Assign GPU controllers: lowest rank per NUMA node where a GPU lives
-    for (auto &gpu : gpus) {
-        // Find minimum MPI rank on this NUMA node
-        int my_rank_if_same = (rank_numa_node == gpu.numa_node) ? my_rank : INT_MAX;
-        int min_rank_on_node;
-        MPI_Allreduce(&my_rank_if_same, &min_rank_on_node, 1,
-                        MPI_INT, MPI_MIN, app_comm_);
-        std::cout << my_rank << " " << min_rank_on_node << " " << gpu.numa_node << std::endl;
-        if (my_rank == min_rank_on_node) {
-            is_gpu_controller_ = true;
-            my_gpu_device_ = gpu.index;
-            std::cout << "Rank " << my_rank << " is GPU controller for GPU " << gpu.index << " on NUMA node " << gpu.numa_node << std::endl;
+    /*
+     * Assign GPU controllers: lowest rank per NUMA node where a GPU lives.
+     *
+     * The selection must not run a different number of collectives on ranks
+     * that see a different number of GPUs: in heterogeneous (CPU+GPU) runs the
+     * CPU-only ranks see zero GPUs, so the per-GPU Allreduce of the original
+     * implementation desynchronised the communicator. Instead, gather each
+     * rank's host identity, NUMA node and local GPU list once, and derive the
+     * controllers identically on every rank.
+     */
+    char my_processor_name[MPI_MAX_PROCESSOR_NAME];
+    int processor_name_len = 0;
+    MPI_Get_processor_name(my_processor_name, &processor_name_len);
+    std::vector<char> all_processor_names(
+        static_cast<size_t>(num_procs) * MPI_MAX_PROCESSOR_NAME, '\0');
+    MPI_Allgather(my_processor_name, MPI_MAX_PROCESSOR_NAME, MPI_CHAR,
+                  all_processor_names.data(), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, app_comm_);
+    std::vector<int> all_host(num_procs, -1);
+    std::vector<std::string> host_names;
+    for (int rank = 0; rank < num_procs; ++rank) {
+        const std::string name(
+            all_processor_names.data() + static_cast<size_t>(rank) * MPI_MAX_PROCESSOR_NAME);
+        int host = -1;
+        for (int i = 0; i < static_cast<int>(host_names.size()); ++i) {
+            if (host_names[i] == name) {
+                host = i;
+                break;
+            }
+        }
+        if (host < 0) {
+            host = static_cast<int>(host_names.size());
+            host_names.push_back(name);
+        }
+        all_host[rank] = host;
+    }
+
+    std::vector<int> all_numa(num_procs, -1);
+    MPI_Allgather(&rank_numa_node, 1, MPI_INT, all_numa.data(), 1, MPI_INT, app_comm_);
+
+    std::vector<int> gpu_counts(num_procs, 0);
+    int local_gpu_count = static_cast<int>(gpus.size());
+    MPI_Allgather(&local_gpu_count, 1, MPI_INT, gpu_counts.data(), 1, MPI_INT, app_comm_);
+    int max_gpus = 0;
+    for (int count : gpu_counts) {
+        max_gpus = std::max(max_gpus, count);
+    }
+
+    if (max_gpus > 0) {
+        std::vector<int> send_packed(static_cast<size_t>(max_gpus) * 2, -1);
+        for (int i = 0; i < local_gpu_count; ++i) {
+            send_packed[static_cast<size_t>(i) * 2] = gpus[i].index;
+            send_packed[static_cast<size_t>(i) * 2 + 1] = gpus[i].numa_node;
+        }
+        std::vector<int> all_packed(static_cast<size_t>(num_procs) * max_gpus * 2, -1);
+        MPI_Allgather(send_packed.data(), max_gpus * 2, MPI_INT,
+                      all_packed.data(), max_gpus * 2, MPI_INT, app_comm_);
+
+        for (int owner = 0; owner < num_procs; ++owner) {
+            for (int i = 0; i < gpu_counts[owner]; ++i) {
+                const size_t offset = (static_cast<size_t>(owner) * max_gpus + i) * 2;
+                const int gpu_index = all_packed[offset];
+                const int gpu_numa = all_packed[offset + 1];
+                if (gpu_numa < 0) {
+                    continue;
+                }
+                int min_rank_on_node = INT_MAX;
+                for (int rank = 0; rank < num_procs; ++rank) {
+                    if (all_host[rank] == all_host[owner] && all_numa[rank] == gpu_numa) {
+                        min_rank_on_node = std::min(min_rank_on_node, rank);
+                    }
+                }
+                if (my_rank == min_rank_on_node) {
+                    is_gpu_controller_ = true;
+                    my_gpu_device_ = gpu_index;
+                    std::cout << "Rank " << my_rank << " is GPU controller for GPU "
+                              << gpu_index << " on NUMA node " << gpu_numa << std::endl;
+                }
+            }
         }
     }
-    
+
     // figure out the total number of GPU controllers
     num_devices_total_ = 0;
     int my_num_devices = is_gpu_controller_ ? 1 : 0;
@@ -111,6 +177,132 @@ void GPUAffineRRDistribution::createWorkgroups()
         // round robin assignment of data to a gpu, making sure the gpu master is rank 0
         int color = work_type_rank % num_devices_total_;
         int order = is_gpu_controller_ ? 0 : my_rank + num_devices_total_;
+
+#ifdef WITH_NUMA_LOCAL_GROUPS
+        /*
+         * NUMA-local grouping: keep the GPU-affine controller selection, but
+         * instead of a node-wide round robin, assign every worker to the
+         * controller whose NUMA node is closest (ACPI SLIT distance), keeping
+         * the group sizes balanced. On a 96c4g node this yields contiguous
+         * 24-rank groups made of the NUMA domains adjacent to the controller's
+         * GPU instead of a workgroup spread over all NUMA domains.
+         *
+         * On multi-node runs the SLIT matrix is only valid within one host, so
+         * ranks on a different host get a large distance and are balanced
+         * across controllers instead of being treated as NUMA-local.
+         */
+        {
+            std::vector<int> all_numa(num_procs, -1);
+            std::vector<int> all_is_controller(num_procs, 0);
+            MPI_Allgather(&rank_numa_node, 1, MPI_INT, all_numa.data(), 1, MPI_INT, app_comm_);
+            MPI_Allgather(&my_num_devices, 1, MPI_INT, all_is_controller.data(), 1, MPI_INT, app_comm_);
+
+            char my_processor_name[MPI_MAX_PROCESSOR_NAME];
+            int processor_name_len = 0;
+            MPI_Get_processor_name(my_processor_name, &processor_name_len);
+            std::vector<char> all_processor_names(
+                static_cast<size_t>(num_procs) * MPI_MAX_PROCESSOR_NAME, '\0');
+            MPI_Allgather(my_processor_name, MPI_MAX_PROCESSOR_NAME, MPI_CHAR,
+                          all_processor_names.data(), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, app_comm_);
+            std::vector<int> all_host(num_procs, -1);
+            std::vector<std::string> host_names;
+            for (int rank = 0; rank < num_procs; ++rank) {
+                const std::string name(
+                    all_processor_names.data() + static_cast<size_t>(rank) * MPI_MAX_PROCESSOR_NAME);
+                int host = -1;
+                for (int i = 0; i < static_cast<int>(host_names.size()); ++i) {
+                    if (host_names[i] == name) {
+                        host = i;
+                        break;
+                    }
+                }
+                if (host < 0) {
+                    host = static_cast<int>(host_names.size());
+                    host_names.push_back(name);
+                }
+                all_host[rank] = host;
+            }
+            const bool multi_host = host_names.size() > 1;
+
+            std::vector<int> controller_ranks;
+            std::vector<int> controller_numa;
+            for (int rank = 0; rank < num_procs; ++rank) {
+                if (all_is_controller[rank]) {
+                    controller_ranks.push_back(rank);
+                    controller_numa.push_back(all_numa[rank]);
+                }
+            }
+
+            if (static_cast<int>(controller_ranks.size()) != num_devices_total_) {
+                std::cerr << "NUMA-local grouping unavailable (found " << controller_ranks.size()
+                          << " controllers for " << num_devices_total_
+                          << " GPUs); falling back to round robin." << std::endl;
+            } else {
+                const int base_size = num_procs / num_devices_total_;
+                const int remainder = num_procs % num_devices_total_;
+                std::vector<int> capacity(num_devices_total_, base_size);
+                for (int i = 0; i < remainder; ++i) {
+                    ++capacity[i];
+                }
+                std::vector<int> assigned_group(num_procs, -1);
+                std::vector<int> members(num_devices_total_, 0);
+                for (int i = 0; i < num_devices_total_; ++i) {
+                    assigned_group[controller_ranks[i]] = i;
+                    members[i] = 1;
+                }
+
+                const int cross_host_distance = 1000000;
+                for (int rank = 0; rank < num_procs; ++rank) {
+                    if (assigned_group[rank] >= 0) {
+                        continue;
+                    }
+                    int best_group = -1;
+                    int best_distance = INT_MAX;
+                    int best_members = INT_MAX;
+                    for (int i = 0; i < num_devices_total_; ++i) {
+                        if (members[i] >= capacity[i]) {
+                            continue;
+                        }
+                        int distance = INT_MAX;
+                        if (multi_host && all_host[rank] != all_host[controller_ranks[i]]) {
+                            distance = cross_host_distance;
+                        } else if (all_numa[rank] >= 0 && controller_numa[i] >= 0) {
+                            const int node_distance = numa_distance(all_numa[rank], controller_numa[i]);
+                            if (node_distance > 0) {
+                                distance = node_distance;
+                            }
+                        }
+                        // Single-host keeps the original distance-only tie-break so
+                        // existing single-node results stay reproducible. Multi-host
+                        // additionally balances member counts, otherwise all remote
+                        // ranks would pile onto the first controller.
+                        const bool is_better = multi_host
+                            ? (distance < best_distance ||
+                               (distance == best_distance && members[i] < best_members))
+                            : (distance < best_distance);
+                        if (is_better) {
+                            best_distance = distance;
+                            best_members = members[i];
+                            best_group = i;
+                        }
+                    }
+                    if (best_group < 0) {
+                        best_group = rank % num_devices_total_;
+                    }
+                    assigned_group[rank] = best_group;
+                    ++members[best_group];
+                }
+
+                color = assigned_group[my_rank];
+                std::cout << "Rank " << my_rank << "/" << num_procs
+                          << " NUMA-local assignment: rank NUMA " << rank_numa_node
+                          << " host " << all_host[my_rank] << "/" << host_names.size()
+                          << " -> group " << color
+                          << " (controller rank " << controller_ranks[color] << ")" << std::endl;
+            }
+        }
+#endif
+
         std::cout << "Rank " << my_rank << "/" << num_procs << " will be in group " << color << " order " << order << std::endl;
 
         // initialize the work group communicator
@@ -183,6 +375,9 @@ std::vector<GPUInfo> GPUAffineRRDistribution::discoverGPUs() {
         return gpus;
     }
 
+    // TODO: hwloc deployments built without PCI/GPU support produce no usable
+    // GPU NUMA mapping here. Add a fallback that reads the NUMA node directly
+    // from /sys/bus/pci/devices/<pci_id>/numa_node instead of parsing lstopo.
     // Run lstopo and capture its text output
     FILE* pipe = popen("lstopo", "r");
     if (!pipe) {

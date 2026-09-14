@@ -8,7 +8,7 @@ rm -rf INSTALL
 
 mkdir BUILD && mkdir INSTALL && cd BUILD
 # Torch only
-# VERBOSE=1 cmake .. -DWITH_TORCH=ON -DTORCH_VERSION="2.7.1" -DCMAKE_INSTALL_PREFIX=/home/rwth0792/CIAO-AI-MAIN/aixeleratorservice/INSTALL && \
+# VERBOSE=1 cmake .. -DWITH_TORCH=ON -DTORCH_VERSION="2.4.0" -DCMAKE_INSTALL_PREFIX=/home/rwth0792/CIAO-AI-MAIN/aixeleratorservice/INSTALL && \
 # TensorFlow only
 # VERBOSE=1 cmake .. -DWITH_TENSORFLOW=ON -DTENSORFLOW_VERSION=2.17.0 -DCMAKE_INSTALL_PREFIX=/home/rwth0792/CIAO-AI-MAIN/aixeleratorservice/INSTALL && \
 # ONNX only

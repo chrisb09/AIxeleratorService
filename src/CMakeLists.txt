@@ -50,10 +50,15 @@ endif()
 
 if(WITH_HWLOC)
     target_sources(AIxeleratorServiceLib PRIVATE distributionStrategy/gpuAffineRRDistribution.cpp)
-    target_include_directories(AIxeleratorServiceLib PRIVATE ${HWLOC_ROOT}/include)
-    target_link_libraries(AIxeleratorServiceLib PUBLIC ${HWLOC_ROOT}/lib/libhwloc.so)
-    target_include_directories(AIxeleratorServiceLib PRIVATE ${NUMA_ROOT}/include)
-    target_link_libraries(AIxeleratorServiceLib PUBLIC ${NUMA_ROOT}/lib/libnuma.so)
+    # Resolve the libraries via find_library: distributions differ in whether
+    # they use <root>/lib or <root>/lib64 (e.g. RH9 keeps libnuma in /usr/lib64).
+    find_library(HWLOC_LIBRARY NAMES hwloc HINTS ${HWLOC_ROOT}/lib)
+    find_library(NUMA_LIBRARY NAMES numa HINTS ${NUMA_ROOT}/lib ${NUMA_ROOT}/lib64)
+    if(NOT HWLOC_LIBRARY OR NOT NUMA_LIBRARY)
+        message(FATAL_ERROR "WITH_HWLOC=ON but libhwloc/libnuma could not be found (HWLOC_ROOT=${HWLOC_ROOT}, NUMA_ROOT=${NUMA_ROOT})")
+    endif()
+    target_include_directories(AIxeleratorServiceLib PRIVATE ${HWLOC_ROOT}/include ${NUMA_ROOT}/include)
+    target_link_libraries(AIxeleratorServiceLib PUBLIC ${HWLOC_LIBRARY} ${NUMA_LIBRARY})
 endif()
 
 if(WITH_TORCH)

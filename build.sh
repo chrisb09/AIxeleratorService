@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${SCRIPT_DIR}/INSTALL-SCOREP"
 LIBTORCH_DIR="$(realpath "${SCRIPT_DIR}/../libtorch")"
+TORCH_VERSION="${SMARTSIM_TORCH_VERSION:-2.4.0}"
 
 echo "Building AIX against libtorch at: ${LIBTORCH_DIR}"
 echo "Libtorch version: $(cat "${LIBTORCH_DIR}/build-version" 2>/dev/null || echo 'unknown')"
@@ -14,6 +15,7 @@ cmake -S "${SCRIPT_DIR}" -B "${SCRIPT_DIR}/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" \
     -DWITH_TORCH=ON \
+    -DTORCH_VERSION="${TORCH_VERSION}" \
     -DLIBTORCH_DIR="${LIBTORCH_DIR}" \
     -DUSE_PYTHON_TORCH_CMAKE_PREFIX=OFF \
     -DAIX_SKIP_VENV_CREATION=ON \
