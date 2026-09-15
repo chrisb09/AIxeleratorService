@@ -480,9 +480,8 @@ if(WITH_SCOREP)
 endif()
 
 add_subdirectory(src)
-add_subdirectory(models)
-
 
 if(BUILD_TESTS)
+  add_subdirectory(models)
   add_subdirectory(test)
 endif()
