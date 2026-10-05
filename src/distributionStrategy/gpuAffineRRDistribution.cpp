@@ -8,6 +8,7 @@
 
 #include <vector>
 #include <map>
+#include <set>
 #include <iostream>
 #include <limits.h>
 #include <unistd.h>
@@ -134,25 +135,56 @@ void GPUAffineRRDistribution::createWorkgroups()
         MPI_Allgather(send_packed.data(), max_gpus * 2, MPI_INT,
                       all_packed.data(), max_gpus * 2, MPI_INT, app_comm_);
 
-        for (int owner = 0; owner < num_procs; ++owner) {
-            for (int i = 0; i < gpu_counts[owner]; ++i) {
-                const size_t offset = (static_cast<size_t>(owner) * max_gpus + i) * 2;
+        std::set<int> assigned_controllers;
+        for (int h = 0; h < static_cast<int>(host_names.size()); ++h) {
+            // Find a representative rank on this host that discovered GPUs
+            int rep_rank = -1;
+            for (int rank = 0; rank < num_procs; ++rank) {
+                if (all_host[rank] == h && gpu_counts[rank] > 0) {
+                    rep_rank = rank;
+                    break;
+                }
+            }
+            if (rep_rank < 0) {
+                continue; // No GPUs discovered on this host
+            }
+
+            const int num_gpus_on_host = gpu_counts[rep_rank];
+            for (int i = 0; i < num_gpus_on_host; ++i) {
+                const size_t offset = (static_cast<size_t>(rep_rank) * max_gpus + i) * 2;
                 const int gpu_index = all_packed[offset];
                 const int gpu_numa = all_packed[offset + 1];
-                if (gpu_numa < 0) {
+                if (gpu_index < 0) {
                     continue;
                 }
                 int min_rank_on_node = INT_MAX;
-                for (int rank = 0; rank < num_procs; ++rank) {
-                    if (all_host[rank] == all_host[owner] && all_numa[rank] == gpu_numa) {
-                        min_rank_on_node = std::min(min_rank_on_node, rank);
+                if (gpu_numa >= 0) {
+                    for (int rank = 0; rank < num_procs; ++rank) {
+                        if (all_host[rank] == h && all_numa[rank] == gpu_numa &&
+                            assigned_controllers.find(rank) == assigned_controllers.end()) {
+                            min_rank_on_node = std::min(min_rank_on_node, rank);
+                        }
                     }
                 }
-                if (my_rank == min_rank_on_node) {
-                    is_gpu_controller_ = true;
-                    my_gpu_device_ = gpu_index;
-                    std::cout << "Rank " << my_rank << " is GPU controller for GPU "
-                              << gpu_index << " on NUMA node " << gpu_numa << std::endl;
+                // Fallback: if no unassigned rank on this host is bound to the GPU's specific NUMA node
+                // (e.g. in het runs where only 1 rank is placed on a multi-NUMA GPU node, or hwloc
+                // did not report NUMA node), fall back to the lowest unassigned rank on that host!
+                if (min_rank_on_node == INT_MAX) {
+                    for (int rank = 0; rank < num_procs; ++rank) {
+                        if (all_host[rank] == h &&
+                            assigned_controllers.find(rank) == assigned_controllers.end()) {
+                            min_rank_on_node = std::min(min_rank_on_node, rank);
+                        }
+                    }
+                }
+                if (min_rank_on_node != INT_MAX) {
+                    assigned_controllers.insert(min_rank_on_node);
+                    if (my_rank == min_rank_on_node) {
+                        is_gpu_controller_ = true;
+                        my_gpu_device_ = gpu_index;
+                        std::cout << "Rank " << my_rank << " is GPU controller for GPU "
+                                  << gpu_index << " on NUMA node " << gpu_numa << std::endl;
+                    }
                 }
             }
         }
@@ -222,8 +254,6 @@ void GPUAffineRRDistribution::createWorkgroups()
                 }
                 all_host[rank] = host;
             }
-            const bool multi_host = host_names.size() > 1;
-
             std::vector<int> controller_ranks;
             std::vector<int> controller_numa;
             for (int rank = 0; rank < num_procs; ++rank) {
@@ -246,51 +276,100 @@ void GPUAffineRRDistribution::createWorkgroups()
                 }
                 std::vector<int> assigned_group(num_procs, -1);
                 std::vector<int> members(num_devices_total_, 0);
+
+                using DomainKey = std::pair<int, int>;  // (host, NUMA node)
+                std::map<DomainKey, std::vector<int>> domains;
+                for (int rank = 0; rank < num_procs; ++rank) {
+                    domains[{all_host[rank], all_numa[rank]}].push_back(rank);
+                }
+                std::map<DomainKey, int> controller_domain;
+                for (int i = 0; i < num_devices_total_; ++i) {
+                    const int c = controller_ranks[i];
+                    controller_domain[{all_host[c], all_numa[c]}] = i;
+                }
+
+                // Controllers are always part of their own workgroup.
                 for (int i = 0; i < num_devices_total_; ++i) {
                     assigned_group[controller_ranks[i]] = i;
                     members[i] = 1;
                 }
 
+                /*
+                 * Assign whole NUMA domains instead of individual ranks:
+                 *  - the domain that hosts a controller is pinned to that
+                 *    controller's workgroup (as far as its capacity allows);
+                 *  - every other domain goes to the controller minimising the
+                 *    ACPI SLIT distance (or the cross-host penalty), with ties
+                 *    broken towards the less-filled workgroup. Domains are only
+                 *    split when a workgroup's remaining capacity is smaller than
+                 *    the domain, which for the usual even splits never happens.
+                 */
                 const int cross_host_distance = 1000000;
-                for (int rank = 0; rank < num_procs; ++rank) {
-                    if (assigned_group[rank] >= 0) {
-                        continue;
-                    }
-                    int best_group = -1;
-                    int best_distance = INT_MAX;
-                    int best_members = INT_MAX;
-                    for (int i = 0; i < num_devices_total_; ++i) {
-                        if (members[i] >= capacity[i]) {
-                            continue;
+                for (auto& entry : domains) {
+                    std::vector<int> unassigned;
+                    for (int rank : entry.second) {
+                        if (assigned_group[rank] < 0) {
+                            unassigned.push_back(rank);
                         }
-                        int distance = INT_MAX;
-                        if (multi_host && all_host[rank] != all_host[controller_ranks[i]]) {
-                            distance = cross_host_distance;
-                        } else if (all_numa[rank] >= 0 && controller_numa[i] >= 0) {
-                            const int node_distance = numa_distance(all_numa[rank], controller_numa[i]);
-                            if (node_distance > 0) {
-                                distance = node_distance;
+                    }
+                    std::sort(unassigned.begin(), unassigned.end());
+                    std::size_t index = 0;
+                    const auto home = controller_domain.find(entry.first);
+                    if (home != controller_domain.end()) {
+                        const int group = home->second;
+                        while (index < unassigned.size() && members[group] < capacity[group]) {
+                            assigned_group[unassigned[index++]] = group;
+                            ++members[group];
+                        }
+                    }
+                    while (index < unassigned.size()) {
+                        int best_group = -1;
+                        int best_distance = INT_MAX;
+                        int best_pair = INT_MAX;
+                        int best_members = INT_MAX;
+                        for (int i = 0; i < num_devices_total_; ++i) {
+                            if (members[i] >= capacity[i]) {
+                                continue;
+                            }
+                            int distance = cross_host_distance;
+                            const bool same_host =
+                                all_host[unassigned[index]] == all_host[controller_ranks[i]];
+                            if (same_host && entry.first.second >= 0 && controller_numa[i] >= 0) {
+                                const int node_distance =
+                                    numa_distance(entry.first.second, controller_numa[i]);
+                                if (node_distance > 0) {
+                                    distance = node_distance;
+                                }
+                            }
+                            // ACPI SLIT is uniform within a socket, so ties are
+                            // broken towards the controller whose NUMA index is
+                            // adjacent within the same NUMA pair (k, k+1), which
+                            // keeps each workgroup on physically neighbouring
+                            // domains instead of a diagonal one.
+                            const int pair_penalty =
+                                (same_host && entry.first.second >= 0 && controller_numa[i] >= 0 &&
+                                 (entry.first.second / 2) == (controller_numa[i] / 2)) ? 0 : 1;
+                            if (distance < best_distance ||
+                                (distance == best_distance && pair_penalty < best_pair) ||
+                                (distance == best_distance && pair_penalty == best_pair &&
+                                 members[i] < best_members)) {
+                                best_distance = distance;
+                                best_pair = pair_penalty;
+                                best_members = members[i];
+                                best_group = i;
                             }
                         }
-                        // Single-host keeps the original distance-only tie-break so
-                        // existing single-node results stay reproducible. Multi-host
-                        // additionally balances member counts, otherwise all remote
-                        // ranks would pile onto the first controller.
-                        const bool is_better = multi_host
-                            ? (distance < best_distance ||
-                               (distance == best_distance && members[i] < best_members))
-                            : (distance < best_distance);
-                        if (is_better) {
-                            best_distance = distance;
-                            best_members = members[i];
-                            best_group = i;
+                        if (best_group < 0) {
+                            best_group = unassigned[index] % num_devices_total_;
+                        }
+                        const int take = std::min(
+                            static_cast<int>(unassigned.size() - index),
+                            capacity[best_group] - members[best_group]);
+                        for (int t = 0; t < take; ++t) {
+                            assigned_group[unassigned[index++]] = best_group;
+                            ++members[best_group];
                         }
                     }
-                    if (best_group < 0) {
-                        best_group = rank % num_devices_total_;
-                    }
-                    assigned_group[rank] = best_group;
-                    ++members[best_group];
                 }
 
                 color = assigned_group[my_rank];

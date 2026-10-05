@@ -4,6 +4,7 @@
 #include <mpi.h>
 
 #include <cstdint>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -139,12 +140,36 @@ inline void flushP2PTimelineEvents()
     std::filesystem::create_directories(directory);
     const std::filesystem::path path = std::filesystem::path(directory) /
         ("aix_p2p_timeline_rank_" + std::to_string(events.front().world_rank) + ".csv");
-    const bool write_header = !std::filesystem::exists(path);
-    std::ofstream stream(path, std::ios::app);
-    if (write_header) {
-        stream << "step,time_s,world_rank,workgroup_rank,is_controller,event,peer_workgroup_rank,"
-               << "range_first_rank,range_end_rank,sample_start,sample_count\n";
+    /*
+     * Truncate when the previous run left stale rows in this file: the
+     * timeline dir is keyed by RUN_ID, so a re-run of the same scenario would
+     * otherwise silently append its rows to the old run's data (every step
+     * then appears twice with interleaved timestamps). A new run is detected
+     * by step 0 restarting after the file already ended on a later step.
+     */
+    bool stale_file = false;
+    {
+        std::ifstream probe(path);
+        if (probe) {
+            std::string line;
+            uint64_t last_step = 0;
+            while (std::getline(probe, line)) {
+                if (line.empty() || line[0] == 's') {
+                    continue;  // header
+                }
+                const uint64_t step = std::strtoull(line.c_str(), nullptr, 10);
+                last_step = std::max(last_step, step);
+            }
+            const auto current_min = std::min_element(
+                events.begin(), events.end(),
+                [](const P2PTimelineEvent& a, const P2PTimelineEvent& b) { return a.step < b.step; });
+            stale_file = current_min != events.end() && current_min->step <= last_step;
+        }
     }
+    std::ofstream stream(path, stale_file ? (std::ios::out | std::ios::trunc)
+                                          : (std::ios::out | std::ios::app));
+    stream << "step,time_s,world_rank,workgroup_rank,is_controller,event,peer_workgroup_rank,"
+           << "range_first_rank,range_end_rank,sample_start,sample_count\n";
     for (const auto& event : events) {
         stream << event.step << ',' << std::setprecision(17) << event.time_s << ','
                << event.world_rank << ',' << event.workgroup_rank << ',' << (event.is_controller ? 1 : 0) << ','

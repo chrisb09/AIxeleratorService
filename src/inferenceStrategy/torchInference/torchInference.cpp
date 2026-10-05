@@ -452,6 +452,12 @@ void TorchInference<T>::inference()
             aixelerator_service::utils::writeP2PTorchForwardEvent(
                 "torch_h2d_start", timeline_sample_start, input_batch_.size(0));
             input_gpu_ = input_batch_.to(torch::Device(torch::kCUDA, device_id_));
+#ifdef AIX_HAS_CUDA_RUNTIME
+            // Close the H2D stage only after the copy completed, otherwise the
+            // Score-P region measures kernel launch and the transfer time is
+            // absorbed by the following stage (matters for compute-heavy models).
+            cudaDeviceSynchronize();
+#endif
             aixelerator_service::utils::writeP2PTorchForwardEvent(
                 "torch_h2d_end", timeline_sample_start, input_batch_.size(0));
 #ifdef AIX_HAS_CUDA_RUNTIME
@@ -480,6 +486,12 @@ void TorchInference<T>::inference()
             aixelerator_service::utils::writeP2PTorchForwardEvent(
                 "torch_forward_start", timeline_sample_start, input_batch_.size(0));
             try { output_gpu_ = torch_model_.forward(inputs).toTensor(); } catch (const std::exception& e) { std::cerr << "INPUT SHAPE: "; for(int k=0; k<input_gpu_.dim(); ++k) std::cerr << input_gpu_.size(k) << " "; std::cerr << "\nException: " << e.what() << "\n"; throw; }
+#ifdef AIX_HAS_CUDA_RUNTIME
+            // Synchronize so the forward Score-P region captures GPU execution
+            // time (torch::jit launches kernels asynchronously); without this,
+            // the compute time shows up in the D2H stage instead.
+            cudaDeviceSynchronize();
+#endif
             aixelerator_service::utils::writeP2PTorchForwardEvent(
                 "torch_forward_end", timeline_sample_start, input_batch_.size(0));
 #ifdef AIX_HAS_CUDA_RUNTIME
