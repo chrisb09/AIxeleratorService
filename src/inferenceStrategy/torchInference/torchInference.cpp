@@ -583,6 +583,23 @@ void TorchInference<T>::inference()
 #endif
         }
     }
+
+    // Opt-in device-memory telemetry: report how much of the GPU the controller
+    // process holds after this inference (used to diagnose VRAM accounting).
+    if (std::getenv("AIX_GPU_MEM_LOG") != nullptr && device_id_ > -1) {
+#ifdef AIX_HAS_CUDA_RUNTIME
+        size_t free_bytes = 0, total_bytes = 0;
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess) {
+            std::cout << "AIX_GPU_MEM device=" << device_id_
+                      << " batch_dim=" << (input_.dim() > 0 ? input_.size(0) : -1)
+                      << " batchsize=" << batchsize_
+                      << " num_batches=" << num_batches
+                      << " used_mib=" << ((total_bytes - free_bytes) >> 20)
+                      << " total_mib=" << (total_bytes >> 20)
+                      << " call=" << call_count << std::endl;
+        }
+#endif
+    }
     call_count++;
 
 #ifdef SCOREP
