@@ -19,6 +19,7 @@
 #include <ATen/cuda/CUDAEvent.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #endif
 
 #ifdef SCOREP
@@ -102,9 +103,49 @@ struct TorchInference<T>::RangePipeline
     c10::cuda::CUDAStream d2h_stream;
     std::deque<Request> requests;
 };
+
+template<typename T>
+struct TorchInference<T>::AsyncPipeline
+{
+    struct AsyncBatch {
+        torch::Tensor input_cpu;
+        torch::Tensor input_gpu;
+        torch::Tensor output_gpu;
+        torch::Tensor output_cpu;
+        int64_t output_start = 0;
+        int64_t output_count = 0;
+        bool output_in_controller_buffer = false;
+        double timeline_anchor_s = 0.0;
+        at::cuda::CUDAEvent input_ready;
+        at::cuda::CUDAEvent compute_done;
+        at::cuda::CUDAEvent output_ready;
+        at::cuda::CUDAEvent h2d_start{cudaEventDefault};
+        at::cuda::CUDAEvent h2d_end{cudaEventDefault};
+        at::cuda::CUDAEvent forward_start{cudaEventDefault};
+        at::cuda::CUDAEvent forward_end{cudaEventDefault};
+        at::cuda::CUDAEvent d2h_start{cudaEventDefault};
+        at::cuda::CUDAEvent d2h_end{cudaEventDefault};
+    };
+
+    AsyncPipeline(int device_id)
+        : device(torch::kCUDA, device_id),
+          h2d_stream(c10::cuda::getStreamFromPool(false, device_id)),
+          compute_stream(c10::cuda::getStreamFromPool(false, device_id)),
+          d2h_stream(c10::cuda::getStreamFromPool(false, device_id))
+    {
+    }
+
+    torch::Device device;
+    c10::cuda::CUDAStream h2d_stream;
+    c10::cuda::CUDAStream compute_stream;
+    c10::cuda::CUDAStream d2h_stream;
+    std::array<AsyncBatch, 2> batches;
+};
 #else
 template<typename T>
 struct TorchInference<T>::RangePipeline {};
+template<typename T>
+struct TorchInference<T>::AsyncPipeline {};
 #endif
 
 template<typename T>
@@ -187,6 +228,13 @@ void TorchInference<T>::init(
         range_pipeline_ = std::make_unique<RangePipeline>(device_id_, depth);
         torch_model_.eval();
     }
+
+    const char* async_pipeline_setting = std::getenv("AIX_ASYNC_GPU_PIPELINE");
+    const bool async_pipeline_enabled = device_id_ > -1 &&
+        (async_pipeline_setting == nullptr || std::string(async_pipeline_setting) != "0");
+    if (async_pipeline_enabled) {
+        async_pipeline_ = std::make_unique<AsyncPipeline>(device_id_);
+    }
 #endif
 }
 
@@ -232,44 +280,22 @@ void TorchInference<T>::inference()
         const bool diagnostics_enabled = std::getenv("AIX_DIAGNOSTICS") != nullptr;
         last_timing_ = {};
 #ifdef AIX_HAS_CUDA_RUNTIME
-        const char* async_pipeline_setting = std::getenv("AIX_ASYNC_GPU_PIPELINE");
-        const bool use_async_pipeline =
-            async_pipeline_setting == nullptr || std::string(async_pipeline_setting) != "0";
-        if (use_async_pipeline)
+        if (async_pipeline_)
         {
-            constexpr int pipeline_depth = 2;
             const char* timeline_directory = std::getenv("AIX_P2P_TIMELINE_DIR");
             const bool timeline_enabled = timeline_directory != nullptr && timeline_directory[0] != '\0';
             const bool timing_enabled = diagnostics_enabled || timeline_enabled;
-            struct AsyncBatch {
-                torch::Tensor input_cpu;
-                torch::Tensor input_gpu;
-                torch::Tensor output_gpu;
-                torch::Tensor output_cpu;
-                int64_t output_start = 0;
-                int64_t output_count = 0;
-                bool output_in_controller_buffer = false;
-                double timeline_anchor_s = 0.0;
-                at::cuda::CUDAEvent input_ready;
-                at::cuda::CUDAEvent compute_done;
-                at::cuda::CUDAEvent output_ready;
-                at::cuda::CUDAEvent h2d_start{cudaEventDefault};
-                at::cuda::CUDAEvent h2d_end{cudaEventDefault};
-                at::cuda::CUDAEvent forward_start{cudaEventDefault};
-                at::cuda::CUDAEvent forward_end{cudaEventDefault};
-                at::cuda::CUDAEvent d2h_start{cudaEventDefault};
-                at::cuda::CUDAEvent d2h_end{cudaEventDefault};
-            };
 
-            std::array<AsyncBatch, pipeline_depth> batches;
-            const auto device = torch::Device(torch::kCUDA, device_id_);
-            const auto h2d_stream = c10::cuda::getStreamFromPool(false, device_id_);
-            const auto compute_stream = c10::cuda::getStreamFromPool(false, device_id_);
-            const auto d2h_stream = c10::cuda::getStreamFromPool(false, device_id_);
+            constexpr int pipeline_depth = 2;
+            auto& batches = async_pipeline_->batches;
+            const auto& device = async_pipeline_->device;
+            const auto& h2d_stream = async_pipeline_->h2d_stream;
+            const auto& compute_stream = async_pipeline_->compute_stream;
+            const auto& d2h_stream = async_pipeline_->d2h_stream;
 
             // A slot is published before reuse so its pinned output buffer and GPU tensors
             // remain valid until both the device copy and the CPU copy have completed.
-            const auto publish = [&](AsyncBatch& batch) {
+            const auto publish = [&](typename AsyncPipeline::AsyncBatch& batch) {
                 batch.output_ready.synchronize();
                 if (!batch.output_in_controller_buffer) {
                     if (timeline_enabled) {
@@ -326,7 +352,7 @@ void TorchInference<T>::inference()
 
             for (int i = 0; i < num_batches; ++i)
             {
-                AsyncBatch& batch = batches[static_cast<size_t>(i) % pipeline_depth];
+                typename AsyncPipeline::AsyncBatch& batch = batches[static_cast<size_t>(i) % pipeline_depth];
                 if (i >= pipeline_depth) {
                     publish(batch);
                 }
@@ -590,13 +616,32 @@ void TorchInference<T>::inference()
 #ifdef AIX_HAS_CUDA_RUNTIME
         size_t free_bytes = 0, total_bytes = 0;
         if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess) {
+            const size_t used_mib = (total_bytes - free_bytes) >> 20;
+            const size_t total_mib = total_bytes >> 20;
             std::cout << "AIX_GPU_MEM device=" << device_id_
                       << " batch_dim=" << (input_.dim() > 0 ? input_.size(0) : -1)
                       << " batchsize=" << batchsize_
                       << " num_batches=" << num_batches
-                      << " used_mib=" << ((total_bytes - free_bytes) >> 20)
-                      << " total_mib=" << (total_bytes >> 20)
-                      << " call=" << call_count << std::endl;
+                      << " used_mib=" << used_mib
+                      << " total_mib=" << total_mib
+                      << " call=" << call_count;
+            
+            // Extended diagnostics: report allocator reserved vs live allocated.
+            if (std::getenv("AIX_GPU_MEM_VERBOSE") != nullptr) {
+                try {
+                    const auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(device_id_);
+                    const size_t allocated_mib = stats.allocated_bytes[0].current >> 20;
+                    const size_t reserved_mib = stats.reserved_bytes[0].current >> 20;
+                    std::cout << " allocated_mib=" << allocated_mib
+                              << " reserved_mib=" << reserved_mib;
+                    if (async_pipeline_) {
+                        std::cout << " h2d_stream=" << async_pipeline_->h2d_stream.id()
+                                  << " compute_stream=" << async_pipeline_->compute_stream.id()
+                                  << " d2h_stream=" << async_pipeline_->d2h_stream.id();
+                    }
+                } catch (...) {}
+            }
+            std::cout << std::endl;
         }
 #endif
     }

@@ -52,6 +52,8 @@ class TorchInference : public InferenceStrategy<T>
         InferenceTiming last_timing_;
         struct RangePipeline;
         std::unique_ptr<RangePipeline> range_pipeline_;
+        struct AsyncPipeline;
+        std::unique_ptr<AsyncPipeline> async_pipeline_;
 };
 
 
