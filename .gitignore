@@ -59,6 +59,8 @@ build-aix.*.out
 # Build and install directories
 INSTALL/
 INSTALL-*/
+INSTALL.*/
+INSTALL.bak/
 build/
 build_*/
 build_aix/
